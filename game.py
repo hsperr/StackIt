@@ -248,6 +248,19 @@ def run_game(board):
         except Exception as e:
             print(e)
 
+def perft(board, AI):
+    try:
+        from time import time
+        print("Starting performance test")
+        board.print()
+        print("{max_depth} - {move} - {score} - {time} - {nodes_searched} - {pv}")
+        for max_depth in range(10):
+            ai = AI(max_depth)
+            t0 = time()
+            move, score = ai.get_best_move(board)
+            print(f"{max_depth} - {move} - {score} - {round(time()-t0, 4)} - {ai.stats['moves_made']} - {ai.principle_variation}")
+    except KeyboardInterrupt as e:
+        pass
 
 if __name__=='__main__':
     testMove()
@@ -257,20 +270,22 @@ if __name__=='__main__':
     testBoxesFor()
 
     from minmax import MinMax
+    from alphabeta import AlphaBeta
     board  = [
-            [0 , 4, 0, 3],
+            [4 , 0, 0, 3],
             [0 , 3, 0, 4],
             [0 , 4, 4, 0]
     ]
     player  = [
-            [0 , 1, 0, 1],
+            [1 , 0, 0, 1],
             [0 , 2, 0, 1],
             [0 , 2, 2, 0]
     ]
     board = Board.from_custom_board(board, player, 1)
-    run_game(board)
+    perft(board, AlphaBeta)
+    perft(board, MinMax)
 
-    ai = MinMax(6)
-    board.print()
-    print(ai.get_best_move(board))
-    board.print()
+    #ai = MinMax(2)
+    #board.print()
+    #print(ai.get_best_move(board), ai.principle_variation)
+    #board.print()
