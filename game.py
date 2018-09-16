@@ -1,4 +1,4 @@
-
+from copy import deepcopy
 
 
 class Board:
@@ -31,6 +31,31 @@ class Board:
         ]
 
         self.current_player = 1
+
+        self.history = []
+
+    @property
+    def other_player(self):
+        if self.current_player == 1:
+            return 2
+        else:
+            return 1
+
+    def possible_moves(self):
+        moves = []
+        for y, row in enumerate(self.board):
+            for x, field in enumerate(row):
+                if not self.player[y][x] or self.player[y][x] == self.current_player:
+                    moves.append((x,y))
+        return moves
+
+    def boxes_for(self, player):
+        boxes = 0
+        for y, row in enumerate(self.board):
+            for x, field in enumerate(row):
+                if self.player[y][x] == player:
+                    boxes+=field
+        return boxes
 
     def value_at(self, x, y):
         return self.board[y][x]
@@ -76,9 +101,22 @@ class Board:
                     fields.append((x,y))
         return fields
 
+    def undo(self):
+        current_player, board, player = self.history.pop()
+        self.current_player = current_player
+        self.board = board
+        self.player = player
+
     def move(self, x, y):
         if self.player[y][x] and not self.player[y][x] == self.current_player:
             raise Exception("Cannot move ontop of other player")
+
+        self.history.append((
+            self.current_player,
+            deepcopy(self.board),
+            deepcopy(self.player)
+        ))
+
         self.board[y][x] += 1
         self.player[y][x] = self.current_player
 
@@ -96,7 +134,7 @@ class Board:
             self.current_player = 1
 
     def print(self):
-        print("Current board:")
+        print(f"Current board at move {len(self.history)} for player {self.current_player}:")
         for y, row in enumerate(self.board):
             for x, field in enumerate(row):
                 player = self.player[y][x]
@@ -181,9 +219,58 @@ def testBigFallover():
     assert board.player_at(2, 2) == 1
     assert board.winning_player() == 1
 
+def testBoxesFor():
+    board  = [
+            [4 , 4, 0],
+            [4 , 3, 0],
+            [0 , 4, 3]
+    ]
+    player  = [
+            [1 , 1, 0],
+            [1 , 2, 0],
+            [0 , 2, 2]
+    ]
+    board = Board.from_custom_board(board, player, 1)
+
+    assert board.boxes_for(board.current_player) == 12
+    assert board.boxes_for(board.other_player) == 10
+
+def run_game(board):
+    while not board.winning_player():
+        board.print()
+        move = input('Please input a move! e.g.: 0,0\n>>')
+        if move == 'exit':
+            break
+
+        try:
+            x, y = move.split(',')
+            board.move(int(x), int(y))
+        except Exception as e:
+            print(e)
+
+
 if __name__=='__main__':
     testMove()
     testMoveOntopOfOtherPlayer()
     testThrowOverMove()
-    test_big_fallover()
+    testBigFallover()
+    testBoxesFor()
 
+    from minmax import MinMax
+    board  = [
+            [0 , 4, 0, 3],
+            [0 , 3, 0, 4],
+            [0 , 4, 4, 0]
+    ]
+    player  = [
+            [0 , 1, 0, 1],
+            [0 , 2, 0, 1],
+            [0 , 2, 2, 0]
+    ]
+    board = Board.from_custom_board(board, player, 1)
+    run_game(board)
+
+    ai = MinMax(6)
+    board.print()
+    print(ai.get_best_move(board))
+    board.print()
