@@ -1,5 +1,4 @@
 from board import Board
-from minmax import MinMax
 from alphabeta import AlphaBeta
 
 def run_game(board):
@@ -15,7 +14,7 @@ def run_game(board):
             continue
         if move == 'perft':
             try:
-                perft(board, MinMax)
+                perft(board, AlphaBeta)
             except KeyboardInterrupt as e:
                 continue
 
@@ -40,7 +39,12 @@ def perft(board, AI):
             ai = AI(max_depth)
             t0 = time()
             move, score = ai.get_best_move(board)
-            print(f"{max_depth} - {move} - {score} - {round(time()-t0, 4)} - {ai.stats['moves_made']} - {ai.principle_variation}")
+            print(f"{max_depth} "
+                  f"- {move} "
+                  f"- {score} "
+                  f"- {round(time()-t0, 4)} "
+                  f"- {' - '.join([k + '=' + str(v) for k, v in ai.stats.items()])} "
+                  f"- {ai.principle_variation}")
     except KeyboardInterrupt as e:
         pass
 
@@ -53,6 +57,7 @@ if __name__=='__main__':
         """
 
     board = Board.from_string(board_string)
+    board = Board()
     run_game(board)
 
 
