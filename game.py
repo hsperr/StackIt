@@ -3,12 +3,21 @@ from minmax import MinMax
 from alphabeta import AlphaBeta
 
 def run_game(board):
-    ai = AlphaBeta(8)
+    ai = AlphaBeta(10)
     while not board.winning_player():
         board.print()
         move = input('Please input a move! e.g.: 0,0\n>>')
         if move == 'exit':
             break
+        if move == 'ai':
+            move, score = ai.get_best_move(board)
+            print(move, score)
+            continue
+        if move == 'perft':
+            try:
+                perft(board, MinMax)
+            except KeyboardInterrupt as e:
+                continue
 
         try:
             x, y = move.split(',')
@@ -27,7 +36,7 @@ def perft(board, AI):
         print("Starting performance test")
         board.print()
         print("{max_depth} - {move} - {score} - {time} - {nodes_searched} - {pv}")
-        for max_depth in range(10):
+        for max_depth in range(100):
             ai = AI(max_depth)
             t0 = time()
             move, score = ai.get_best_move(board)
@@ -36,17 +45,14 @@ def perft(board, AI):
         pass
 
 if __name__=='__main__':
-    board  = [
-            [0 , 0, 0],
-            [0 , 0, 0],
-            [0 , 0, 0]
-    ]
-    player  = [
-            [0 , 0, 0],
-            [0 , 0, 0],
-            [0 , 0, 0]
-    ]
-    board = Board.from_custom_board(board, player, 1)
+    board_string = """
+            2
+            41 31 11
+            11 42 31
+            42 42 42
+        """
+
+    board = Board.from_string(board_string)
     run_game(board)
 
 

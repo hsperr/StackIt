@@ -1,5 +1,6 @@
 from copy import deepcopy
 from utils import StackItException
+import math
 
 class Board:
     PLAYER1COLOR = '\033[92m'
@@ -7,6 +8,35 @@ class Board:
     ENDC = '\033[0m'
 
     INITAL_BOX_INCREASE = 3
+
+    @classmethod
+    def from_string(cls, board_string):
+        board_string = board_string.replace(" ", '')
+        board_string = board_string.replace("\n", '')
+
+        instance = cls()
+        instance.current_player = int(board_string[0])
+        board_string = board_string[1:]
+
+        def parse_row(row):
+            board, player = [], [] 
+            for i in range(0, len(row), 2):
+                board.append(int(row[i]))
+                player.append(int(row[i+1]))
+
+            return board, player
+
+        field_size = int(math.sqrt(len(board_string)/2)) * 2
+        board, player = [], [] 
+        for i in range(0, len(board_string), field_size):
+            temp_board, temp_player = parse_row(board_string[i:i+field_size])
+            board.append(temp_board)
+            player.append(temp_player)
+
+        instance.board = board
+        instance.player = player
+        return instance
+
     
     @classmethod
     def from_custom_board(cls, board, player, current_player=1):
@@ -172,3 +202,12 @@ class Board:
         print()
 
 
+if __name__ == '__main__':
+    board_string  = """
+            2
+            41 31 11
+            11 42 31
+            42 42 42
+        """
+    board = Board.from_string(board_string)
+    board.print()
