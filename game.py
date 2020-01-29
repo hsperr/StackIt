@@ -43,7 +43,7 @@ def perft(board, AI):
                   f"- {move} "
                   f"- {score} "
                   f"- {round(time()-t0, 4)} "
-                  f"- {' - '.join([k + '=' + str(v) for k, v in ai.stats.items()])} "
+                  f"- {' - '.join([k + '=' + str(v) for k, v in sorted(ai.stats.items())])} "
                   f"- {ai.principle_variation}")
     except KeyboardInterrupt as e:
         pass
@@ -57,7 +57,6 @@ if __name__=='__main__':
         """
 
     board = Board.from_string(board_string)
-    board = Board()
     run_game(board)
 
 

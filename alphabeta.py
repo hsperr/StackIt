@@ -1,10 +1,12 @@
 from copy import deepcopy
 from collections import defaultdict
+import random
 
 
 class AlphaBeta:
     EXACT_MATCH = 1
-    BETA_CUTOFF = 2
+    UPPERBOUND = 2
+    LOWERBOUND = 3
 
     def __init__(self, max_depth, debug=False):
         self.max_depth = max_depth
@@ -16,9 +18,12 @@ class AlphaBeta:
         self.stats = defaultdict(int)
         move, score, pv = self._maxmimize(board, -1000000, 1000000, self.max_depth)
         self.principle_variation = pv
+        self.stats['hash_table_size'] = len(self.hashtable)
         return move, score
 
     def _maxmimize(self, board, alpha, beta, depth):
+        original_alpha = alpha
+
         if depth == 0:
             score = board.boxes_for(board.current_player) - board.boxes_for(board.other_player)
             return None, score, []
@@ -30,13 +35,27 @@ class AlphaBeta:
 
         hash_move = None
         hash_entry = self.hashtable.get(board.hash(), None)
-        if hash_entry and False:
+        if hash_entry:
             hash_depth, hash_move, hash_alpha, hash_beta, hash_type = hash_entry
-            if hash_depth >= depth and hash_type == AlphaBeta.EXACT_MATCH:
-                self.stats['hash_cutoff'] += 1
-                return hash_move, hash_alpha, [hash_move]
+            if hash_depth >= depth:
+                if hash_type == AlphaBeta.EXACT_MATCH:
+                    self.stats['hash_exact'] += 1
+                    return hash_move, hash_alpha, [hash_move]
+                elif hash_type == AlphaBeta.LOWERBOUND:
+                    alpha = max(alpha, hash_alpha)
+                elif hash_type == AlphaBeta.UPPERBOUND:
+                    beta = min(beta, hash_alpha)
 
-        for move in board.possible_moves():
+                if alpha >= beta:
+                    self.stats['hash_cutoff'] += 1
+                    return hash_move, hash_alpha, [hash_move]
+
+        poss_moves = board.possible_moves()
+        if hash_move and hash_move in poss_moves:
+            self.stats['using_hash_move_first'] += 1
+            poss_moves = [hash_move] + [x for x in poss_moves if not x == hash_move]
+
+        for move in poss_moves:
             board.move(*move)
             self.stats['moves_made'] += 1
             _, score, local_pv = self._maxmimize(board, -beta, -alpha, depth - 1)
@@ -61,5 +80,12 @@ class AlphaBeta:
                 self.stats['beta_cutoff'] += 1
                 break
 
-        self.hashtable[board.hash()] = (depth, best_move, alpha, beta, AlphaBeta.EXACT_MATCH)
+        if best_score <= original_alpha:
+            hash_type = AlphaBeta.UPPERBOUND
+        elif best_score >= beta:
+            hash_type = AlphaBeta.LOWERBOUND
+        else:
+            hash_type = AlphaBeta.EXACT_MATCH
+
+        self.hashtable[board.hash()] = (depth, best_move, alpha, beta, hash_type)
         return best_move, best_score, principle_variation

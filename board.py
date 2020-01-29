@@ -194,8 +194,7 @@ class Board:
     def print(self):
         current_color = self._player_color(self.current_player)
         spacing = "  "
-        print(f"Current board at move {len(self.history)} for player {current_color + str(
-            self.current_player) + Board.ENDC}:")
+        print(f"Current board at move {len(self.history)} for player {current_color + str(self.current_player) + Board.ENDC}:")
         print()
         print(spacing, ' ', ' '.join([str(x) for x in range(self.size_x)]))
         print(spacing, ' ', ' '.join(['-' for x in range(self.size_x)]))
