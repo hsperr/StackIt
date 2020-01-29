@@ -2,14 +2,15 @@ from board import Board
 from alphabeta import AlphaBeta
 
 def run_game(board):
-    ai = AlphaBeta(10)
+    ai = AlphaBeta()
+    THINKING_TIME = 60
     while not board.winning_player():
         board.print()
         move = input('Please input a move! e.g.: 0,0\n>>')
         if move == 'exit':
             break
         if move == 'ai':
-            move, score = ai.get_best_move(board)
+            move, score = ai.get_best_move_time(board, THINKING_TIME, show_perft=True)
             print(move, score)
             continue
         if move == 'perft':
@@ -21,7 +22,9 @@ def run_game(board):
         try:
             x, y = move.split(',')
             board.move(int(x), int(y))
-            move, score = ai.get_best_move(board)
+            board.print()
+
+            move, score = ai.get_best_move_time(board, THINKING_TIME, show_perft=True)
             print(move, score)
             board.move(*move)
         except Exception as e:
@@ -35,16 +38,9 @@ def perft(board, AI):
         print("Starting performance test")
         board.print()
         print("{max_depth} - {move} - {score} - {time} - {nodes_searched} - {pv}")
-        for max_depth in range(100):
-            ai = AI(max_depth)
-            t0 = time()
-            move, score = ai.get_best_move(board)
-            print(f"{max_depth} "
-                  f"- {move} "
-                  f"- {score} "
-                  f"- {round(time()-t0, 4)} "
-                  f"- {' - '.join([k + '=' + str(v) for k, v in sorted(ai.stats.items())])} "
-                  f"- {ai.principle_variation}")
+        ai = AI()
+        move, score = ai.get_best_move_depth(board, 10000, show_perft=True)
+
     except KeyboardInterrupt as e:
         pass
 
