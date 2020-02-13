@@ -3,7 +3,7 @@ from alphabeta import AlphaBeta
 
 def run_game(board):
     ai = AlphaBeta()
-    THINKING_TIME = 60
+    THINKING_TIME = 35
     while not board.winning_player():
         board.print()
         move = input('Please input a move! e.g.: 0,0\n>>')
@@ -46,13 +46,17 @@ def perft(board, AI):
 
 if __name__=='__main__':
     board_string = """
-            2
-            41 31 11
-            11 42 31
-            42 42 42
+            1
+            32 00 31 42
+            11 42 32 00
+            31 11 42 32
+            41 31 00 41
         """
 
+
+
     board = Board.from_string(board_string)
+    #board = Board()
     run_game(board)
 
 

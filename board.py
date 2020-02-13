@@ -87,13 +87,36 @@ class Board:
         else:
             return 1
 
+    def flip(self):
+        b = Board()
+        b.current_player = self.current_player
+        b.board = self.board[::-1]
+        b.player = self.player[::-1]
+        return b
+
+    def rotate(self):
+        b = Board()
+        b.current_player = self.current_player
+        b.board = [list(x) for x in zip(*self.board[::-1])]
+        b.player = [list(x) for x in zip(*self.player[::-1])]
+        return b
+
+    def possible_attack_moves(self):
+        moves = []
+        for y, row in enumerate(self.board):
+            for x, field in enumerate(row):
+                if self.player[y][x] == self.current_player and field == 4:
+                    moves.append((x, y))
+        return moves
+
     def possible_moves(self):
         moves = []
         for y, row in enumerate(self.board):
             for x, field in enumerate(row):
                 if not self.player[y][x] or self.player[y][x] == self.current_player:
-                    moves.append((x, y))
-        return moves
+                    moves.append((field if field else 3 + (abs(x-self.size_x//2) + abs(y-self.size_y//2))/10, x, y))
+        moves.sort()
+        return [(x[-2], x[-1]) for x in moves]
 
     def boxes_for(self, player):
         boxes = 0
