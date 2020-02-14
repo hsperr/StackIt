@@ -44,11 +44,15 @@ class Board:
     def hash(self):
         return hash(self.to_string())
 
+    def copy(self):
+        return Board.from_custom_board(self.board, self.player, self.current_player)
+
     @classmethod
     def from_custom_board(cls, board, player, current_player=1):
+        import copy
         instance = cls()
-        instance.board = board
-        instance.player = player
+        instance.board = copy.deepcopy(board)
+        instance.player = copy.deepcopy(player)
         instance.current_player = current_player
         return instance
 
