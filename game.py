@@ -1,50 +1,13 @@
 from board import Board
 from alphabeta import AlphaBeta
+from mcts import MonteCarloTreeSearch
 
-def run_game(board):
-    ai = AlphaBeta()
-    THINKING_TIME = 35
-    while not board.winning_player():
-        board.print()
-        move = input('Please input a move! e.g.: 0,0\n>>')
-        if move == 'exit':
-            break
-        if move == 'ai':
-            move, score = ai.get_best_move_time(board, THINKING_TIME, show_perft=True)
-            print(move, score)
-            continue
-        if move == 'perft':
-            try:
-                perft(board, AlphaBeta)
-            except KeyboardInterrupt as e:
-                continue
+def run_game():
+    THINKING_TIME = 10
+    HUMAN = 'human'
 
-        try:
-            x, y = move.split(',')
-            board.move(int(x), int(y))
-            board.print()
+    PLAYERS = {1: HUMAN, 2: AlphaBeta()}
 
-            move, score = ai.get_best_move_time(board, THINKING_TIME, show_perft=True)
-            print(move, score)
-            board.move(*move)
-        except Exception as e:
-            print(e)
-    board.print()
-
-
-def perft(board, AI):
-    try:
-        from time import time
-        print("Starting performance test")
-        board.print()
-        print("{max_depth} - {move} - {score} - {time} - {nodes_searched} - {pv}")
-        ai = AI()
-        move, score = ai.get_best_move_depth(board, 10000, show_perft=True)
-
-    except KeyboardInterrupt as e:
-        pass
-
-if __name__=='__main__':
     board_string = """
             1
             32 00 31 42
@@ -52,18 +15,50 @@ if __name__=='__main__':
             31 11 42 32
             41 31 00 41
         """
-
-
-
     board = Board.from_string(board_string)
-    #board = Board()
-    run_game(board)
+
+    command = ''
+    while True:
+        for p, t in PLAYERS.items():
+            print(f"Player {p}: {t}")
+
+        board.print()
+
+        if PLAYERS[board.current_player] == HUMAN:
+            command = input('Please input a move! e.g.: 0,0\n>>').strip()
+
+        if command == 'exit':
+            break
+        elif command.startswith('new'):
+            if command == 'new':
+                board = Board()
+            else:
+                cmd, size_x, size_y = command.split(' ')
+                board = Board(int(size_x), int(size_y))
+        elif command == 'search':
+            move, score = AlphaBeta().get_best_move_depth(board, THINKING_TIME, show_perft=True)
+        elif command.startswith('set'):
+            if command == 'set':
+                print("Usage: set <player_number> <player_type>")
+                print(f"player_type: {HUMAN}, alpha, mcts")
+            else:
+                cmd, player, player_type = command.split(' ')
+                if player_type == HUMAN:
+                    PLAYERS[int(player)] = HUMAN
+                elif player_type == 'alpha':
+                    PLAYERS[int(player)] = AlphaBeta()
+                elif player_type == 'mcts':
+                    PLAYERS[int(player)] = MonteCarloTreeSearch()
+        else:
+            if PLAYERS[board.current_player] == HUMAN:
+                split_move = command.split(',')
+                board.move(*split_move)
+            else:
+                move, score = PLAYERS[board.current_player].get_best_move_time(board, THINKING_TIME, show_perft=True)
+                board.move(*move)
+
+        command = ''
 
 
-    #perft(board, AlphaBeta)
-    #perft(board, MinMax)
-
-    #ai = MinMax(2)
-    #board.print()
-    #print(ai.get_best_move(board), ai.principle_variation)
-    #board.print()
+if __name__=='__main__':
+    run_game()

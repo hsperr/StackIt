@@ -56,21 +56,9 @@ class Board:
         instance.current_player = current_player
         return instance
 
-    def __init__(self):
-        self.board = [
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0]
-        ]
-        self.player = [
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0]
-        ]
+    def __init__(self, size_x=5, size_y=5):
+        self.board = [[0 for _ in range(size_x)] for _ in range(size_y)]
+        self.player = [[0 for _ in range(size_x)] for _ in range(size_y)]
 
         self.current_player = 1
 
@@ -182,7 +170,7 @@ class Board:
 
     def move(self, x, y):
         if self.player[y][x] and not self.player[y][x] == self.current_player:
-            raise StackItException("Cannot move ontop of other player")
+            raise StackItException(f"Cannot move ontop of other player (current_player={self.current_player}, x={x}, y={y}, field={self.player[y][x]})")
 
         self.history.append((
             self.current_player,

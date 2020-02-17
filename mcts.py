@@ -34,8 +34,8 @@ class MonteCarloTreeSearch:
         for pct_win, move, plays in rates:
             print(pct_win, move, plays)
 
-        _, move, _ = max(rates)
-        return move
+        score, move, _ = max(rates)
+        return move, score
 
     def _run_simulation(self, board):
 
@@ -105,7 +105,7 @@ if __name__=='__main__':
     board.print()
 
     mcts = MonteCarloTreeSearch()
-    mcts.get_best_move_time(board, 120)
+    mcts.get_best_move_time(board, 60)
 
 
 

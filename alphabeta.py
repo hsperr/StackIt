@@ -20,6 +20,8 @@ class AlphaBeta:
                 cnt +=1
                 hash_depth, hash_move, hash_alpha, hash_beta, hash_type, _ = entry
                 pv.append(hash_move)
+                if not hash_move in board.possible_moves():
+                    break
                 board.move(*hash_move)
             else:
                 break
