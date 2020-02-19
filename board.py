@@ -1,6 +1,7 @@
 from copy import deepcopy
 from utils import StackItException
 import math
+import time
 
 
 class Board:
@@ -168,7 +169,7 @@ class Board:
         self.board = board
         self.player = player
 
-    def move(self, x, y):
+    def move(self, x, y, display=False):
         if self.player[y][x] and not self.player[y][x] == self.current_player:
             raise StackItException(f"Cannot move ontop of other player (current_player={self.current_player}, x={x}, y={y}, field={self.player[y][x]})")
 
@@ -187,10 +188,16 @@ class Board:
 
         if self.board[y][x] == 5:
             self._throw_over(x, y)
+            if display:
+                self.print()
+                time.sleep(1)
             fields = self._fields_to_throw()
             while fields:
                 for field in fields:
                     self._throw_over(*field)
+                    if display:
+                        self.print()
+                        time.sleep(1)
                 fields = self._fields_to_throw()
 
         if self.current_player == 1:

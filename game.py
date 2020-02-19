@@ -3,7 +3,7 @@ from alphabeta import AlphaBeta
 from mcts import MonteCarloTreeSearch
 
 def run_game():
-    THINKING_TIME = 10
+    THINKING_TIME = 35
     HUMAN = 'human'
 
     PLAYERS = {1: HUMAN, 2: AlphaBeta()}
@@ -48,14 +48,15 @@ def run_game():
                 elif player_type == 'alpha':
                     PLAYERS[int(player)] = AlphaBeta()
                 elif player_type == 'mcts':
-                    PLAYERS[int(player)] = MonteCarloTreeSearch()
+                    PLAYERS[int(player)] = MonteCarloTreeSearch(max_moves=20)
         else:
             if PLAYERS[board.current_player] == HUMAN:
-                split_move = command.split(',')
-                board.move(*split_move)
+                split_move = (int(x) for x in command.split(' '))
+                board.move(*split_move, display=True)
             else:
                 move, score = PLAYERS[board.current_player].get_best_move_time(board, THINKING_TIME, show_perft=True)
-                board.move(*move)
+                print(f"Player {board.current_player}, move: {move}")
+                board.move(*move, display=True)
 
         command = ''
 

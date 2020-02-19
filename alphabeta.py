@@ -48,7 +48,7 @@ class AlphaBeta:
                       f"- {round(time.time()-self.start_time, 2)} "
                       f"- {' - '.join([k + '=' + str(v) for k, v in sorted(self.stats.items())])} "
                       f"- {self.get_pv(board)[:4]}")
-            depth += 2
+            depth += 1
             if time.time()-self.start_time >= allowed_time_in_s:
                 break
 

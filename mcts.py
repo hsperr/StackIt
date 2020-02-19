@@ -4,9 +4,9 @@ import math
 
 class MonteCarloTreeSearch:
 
-    def __init__(self):
+    def __init__(self, max_moves=100000):
         self.states = []
-        self.max_moves = 100000
+        self.max_moves = max_moves
 
         self.plays = {}
         self.wins = {}
@@ -30,12 +30,30 @@ class MonteCarloTreeSearch:
         next_states = [(player, board_string, move) for move in poss_moves]
 
         print(games)
-        rates = sorted((self.wins.get(S, 0) / float(self.plays.get(S, 1)), S[-1], self.plays.get(S, 0)) for S in next_states)
-        for pct_win, move, plays in rates:
-            print(pct_win, move, plays)
+        rates = sorted((self.wins.get(S, 0) / float(self.plays.get(S, 1)), S, self.plays.get(S, 0)) for S in next_states)
+        for pct_win, state, plays in rates:
+            move = state[-1]
+            print(pct_win, move, self.get_pv(board.copy(), state))
 
-        score, move, _ = max(rates)
-        return move, score
+        score, state, _ = max(rates)
+        return state[-1], score
+
+    def get_pv(self, board, state):
+        if state in self.plays:
+            (_, _, move) = state
+            board.move(*move)
+            poss_moves = board.possible_moves()
+            player = board.current_player
+            board_string = board.to_string()
+            next_states = [(player, board_string, move) for move in poss_moves]
+            try:
+                best_next_state = sorted((self.wins.get(S, 0) / float(self.plays.get(S, 1)), S) for S in next_states)[-1][-1]
+                return [(move, self.wins.get(state, 0), float(self.plays.get(state, 1)))] + self.get_pv(board, best_next_state)
+            except:
+                print(next_states)
+                return []
+
+        return []
 
     def _run_simulation(self, board):
 
@@ -95,7 +113,7 @@ if __name__=='__main__':
     from board import Board
 
     board_string = """
-        1
+        2
         32 00 31 42
         11 42 32 00
         31 11 42 32
