@@ -122,8 +122,13 @@ if __name__=='__main__':
     board = Board.from_string(board_string)
     board.print()
 
-    mcts = MonteCarloTreeSearch()
-    mcts.get_best_move_time(board, 60)
+    mcts = MonteCarloTreeSearch(max_moves=10)
+    mcts.get_best_move_time(board, 30)
+
+    from alphabeta import AlphaBeta
+
+    alpha = AlphaBeta()
+    alpha.get_best_move_time(board, 30, show_perft=True)
 
 
 

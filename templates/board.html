@@ -1,0 +1,67 @@
+
+<div> Player 1: Human </div>
+<div> Player 2: AlphaBeta </div>
+<div> Current Player: </div>
+
+{% for row in board %}
+    {% for field in row%}
+        <div class="tile" id="{{field[0]}}" style="color:{{field[1]}};clear:{{field[2]}}">{{field[3]}}</div>
+    {% endfor %}
+{% endfor %}
+
+<div id="thinking"> </div>
+
+
+<script>
+    var elem = document.getElementById('thinking');
+
+
+    $(".tile")
+    .on("click", function(){
+        currentTile = $(this);
+        $.ajax({
+          url: "/move",
+          type: "post",
+          data: {"move": currentTile.attr('id')},
+          success: function(response) {
+            $("#board").html(response);
+
+            var timeLeft = 10;
+            var timerId = setInterval(countdown, 1000);
+                function countdown() {
+                  if (timeLeft == 0) {
+                    clearTimeout(timerId);
+                    doSomething();
+                  } else {
+                    elem.innerHTML = timeLeft + ' seconds remaining';
+                    timeLeft--;
+                  }
+                }
+            //start call to get answer from machine
+            $.ajax({
+              url: "/move",
+              type: "get",
+              data: {},
+              success: function(response) {
+                $("#board").html(response);
+              },
+              error: function(xhr) {
+                //Do Something to handle error
+              }
+            });
+          },
+          error: function(xhr) {
+            //Do Something to handle error
+          }
+        });
+    })
+    .on('mouseenter',function(){
+		$(this).addClass('hover');
+	})
+
+	.on('mouseleave',function(){
+		$(this).removeClass('hover');
+	});
+
+
+</script>
