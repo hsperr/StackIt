@@ -15,12 +15,11 @@
 <script>
     var elem = document.getElementById('thinking');
 
-
     $(".tile")
     .on("click", function(){
         currentTile = $(this);
         $.ajax({
-          url: "/move",
+          url: "{{gameid}}/move",
           type: "post",
           data: {"move": currentTile.attr('id')},
           success: function(response) {
@@ -39,7 +38,7 @@
                 }
             //start call to get answer from machine
             $.ajax({
-              url: "/move",
+              url: "{{gameid}}/move",
               type: "get",
               data: {},
               success: function(response) {

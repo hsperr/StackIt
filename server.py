@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, redirect
 import board as b
 from alphabeta import AlphaBeta
 
@@ -24,33 +24,34 @@ def board_to_template(board):
         display.append(display_row)
     return display
 
-
 @app.route('/')
 def index():
-    board_string = """
-            1
-            32 00 31 42
-            11 42 32 00
-            31 11 42 32
-            41 31 00 41
-        """
-    board = b.Board.from_string(board_string)
+    import uuid
+    iid = str(uuid.uuid1())
 
-    games[0] = board
+    board = b.Board()
+    games[iid] = board
+    return redirect(f"/game/{iid}")
 
-    return render_template('index.html', board=board_to_template(board))
+@app.route('/game/<iid>')
+def main(iid):
+    if not iid in games:
+        board = b.Board()
+        games[iid] = board
+    board = games[iid]
+    return render_template('index.html', board=board_to_template(board), gameid=iid)
 
-@app.route('/new', methods=["POST"])
-def new():
+@app.route('/game/<iid>/new', methods=["POST"])
+def new(iid):
     sizex = int(request.form.get('x'))
     sizey = int(request.form.get('y'))
-    games[0] = b.Board(sizex, sizey)
-    return render_template('board.html', board=board_to_template(games[0]))
+    games[iid] = b.Board(sizex, sizey)
+    return render_template('board.html', board=board_to_template(games[iid]), gameid=iid)
 
 
-@app.route("/move", methods=["POST", "GET"])
-def move():
-    board = games[0]
+@app.route("/game/<iid>/move", methods=["POST", "GET"])
+def move(iid):
+    board = games[iid]
     if request.method == "POST":
         move = [int(x) for x in request.form.get('move').split('-')]
         board.move(*move)
@@ -58,14 +59,14 @@ def move():
     else:
         move, score = ai.get_best_move_time(board, 10, show_perft=True)
         board.move(*move)
-        return render_template('board.html', board=board_to_template(board))
+        return render_template('board.html', board=board_to_template(board), gameid=iid)
 
-@app.route("/undo", methods=["POST"])
-def undo():
-    board = games[0]
+@app.route("/game/<iid>/undo", methods=["POST"])
+def undo(iid):
+    board = games[iid]
     board.undo()
-    return render_template('board.html', board=board_to_template(board))
+    return render_template('board.html', board=board_to_template(board), gameid=iid)
 
 
 if __name__=='__main__':
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=9999, debug=True)

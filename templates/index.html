@@ -61,7 +61,7 @@
         sizex = $("#sizex").val();
         sizey = $("#sizey").val();
         $.ajax({
-          url: "/new",
+          url: "{{gameid}}/new",
           type: "post",
           data: {"x": sizex, "y": sizey},
           success: function(response) {
@@ -75,7 +75,7 @@
     $("#btn-undo")
     .on("click", function(){
         $.ajax({
-          url: "/undo",
+          url: "{{gameid}}/undo",
           type: "post",
           data: {},
           success: function(response) {
