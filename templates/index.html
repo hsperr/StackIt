@@ -42,6 +42,12 @@
                  </div>
                 <button id="btn-new" type="button" class="btn btn-dark">New</button>
             </form>
+            <form>
+                <div class="input-group">
+                    <input type="thinking_time" class="form-control" id="thinking_time" aria-describedby="" value="20">
+                </div>
+                <button id="btn-set" type="button" class="btn btn-dark">Set</button>
+            </form>
             <br />
             <button id="btn-undo" type="button" class="btn btn-dark">Undo</button>
         </div>
@@ -61,7 +67,7 @@
         sizex = $("#sizex").val();
         sizey = $("#sizey").val();
         $.ajax({
-          url: "{{gameid}}/new",
+          url: "{{game.iid}}/new",
           type: "post",
           data: {"x": sizex, "y": sizey},
           success: function(response) {
@@ -72,10 +78,27 @@
           }
         });
     })
+
+    $("#btn-set")
+    .on("click", function(){
+        thinking_time = $("#thinking_time").val();
+        $.ajax({
+          url: "{{game.iid}}/set",
+          type: "post",
+          data: {"thinking_time": thinking_time},
+          success: function(response) {
+            $("#board").html(response);
+          },
+          error: function(xhr) {
+             //Do Something to handle error
+          }
+        });
+    })
+
     $("#btn-undo")
     .on("click", function(){
         $.ajax({
-          url: "{{gameid}}/undo",
+          url: "{{game.iid}}/undo",
           type: "post",
           data: {},
           success: function(response) {

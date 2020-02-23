@@ -1,9 +1,9 @@
 
 <div> Player 1: Human </div>
-<div> Player 2: AlphaBeta </div>
-<div> Current Player: </div>
+<div> Player 2: {{game.ai}} </div>
+<div> Current Player: <p style="color:{{game.current_player()}}">{{game.current_player()}}</p></div>
 
-{% for row in board %}
+{% for row in game.board_to_template() %}
     {% for field in row%}
         <div class="tile" id="{{field[0]}}" style="color:{{field[1]}};clear:{{field[2]}}">{{field[3]}}</div>
     {% endfor %}
@@ -19,13 +19,13 @@
     .on("click", function(){
         currentTile = $(this);
         $.ajax({
-          url: "{{gameid}}/move",
+          url: "{{game.iid}}/move",
           type: "post",
           data: {"move": currentTile.attr('id')},
           success: function(response) {
             $("#board").html(response);
 
-            var timeLeft = 10;
+            var timeLeft = {{game.thinking_time}};
             var timerId = setInterval(countdown, 1000);
                 function countdown() {
                   if (timeLeft == 0) {
@@ -38,7 +38,7 @@
                 }
             //start call to get answer from machine
             $.ajax({
-              url: "{{gameid}}/move",
+              url: "{{game.iid}}/move",
               type: "get",
               data: {},
               success: function(response) {

@@ -10,6 +10,9 @@ class AlphaBeta:
         self.debug = debug
         self.hashtable = {}
 
+    def __repr__(self):
+        return f"AlphaBeta()"
+
     def get_pv(self, board):
         pv = []
         cnt = 0
@@ -36,6 +39,12 @@ class AlphaBeta:
         self.hashtable = {}
         self.start_time = time.time()
         self.allowed_time = allowed_time_in_s
+
+        poss_moves = board.possible_moves()
+        if len(poss_moves) == 0:
+            return None, None
+        if len(poss_moves) == 1:
+            return poss_moves[0], 0
 
         depth = 0
         best_move, best_score = None, None
