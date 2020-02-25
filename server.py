@@ -13,15 +13,20 @@ class Game:
         self.iid = iid
         self.board = board
         self.ai = ai
+        self.player_names = ["HUMAN", str(ai)]
         self.thinking_time = thinking_time
 
     def current_player(self):
+        return self.player_names[self.board.current_player - 1]
+
+    def current_player_color(self):
         return Game.COLORS[self.board.current_player]
+
 
     def board_to_template(self):
         display = []
         for y, row in enumerate(self.board.board):
-            display_row = []
+            display_row = []#f"{y}-x", Game.COLORS[0], 'left', y]
             for x, field in enumerate(row):
                 display_row.append(
                     (
@@ -33,6 +38,7 @@ class Game:
                 )
             display.append(display_row)
         return display
+
 
 @app.route('/')
 def index():
@@ -72,6 +78,7 @@ def move(iid):
 @app.route("/game/<iid>/undo", methods=["POST"])
 def undo(iid):
     game = games[iid]
+    game.board.undo()
     game.board.undo()
     return render_template('board.html', game=game)
 

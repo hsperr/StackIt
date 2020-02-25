@@ -35,20 +35,25 @@
     <div class="col-sm-4">
         <h3>Menu</h3>
         <div id="Menu">
-            <form>
-                <div class="input-group">
-                    <input type="sizex" class="form-control" id="sizex" aria-describedby="" value="5">
-                    <input type="sizey" class="form-control" id="sizey" aria-describedby="" value="5">
-                 </div>
-                <button id="btn-new" type="button" class="btn btn-dark">New</button>
-            </form>
-            <form>
-                <div class="input-group">
-                    <input type="thinking_time" class="form-control" id="thinking_time" aria-describedby="" value="20">
+            <div class="input-group mb-3">
+
+                <div class="input-group-prepend">
+                    <span class="input-group-text" id="label_size">Board Size:</span>
                 </div>
-                <button id="btn-set" type="button" class="btn btn-dark">Set</button>
-            </form>
-            <br />
+                <input type="text" class="form-control" id="size" aria-describedby="" value="{{game.board.size_x}}">
+                <button id="btn-new" type="button" class="btn btn-dark">New</button>
+            </div>
+            <br>
+
+            <div class="input-group mb-3">
+              <div class="input-group-prepend">
+                <span class="input-group-text" id="basic-addon1">Ai thinking time:</span>
+              </div>
+              <input type="text" class="form-control" id="thinking_time" aria-describedby="" value="{{game.thinking_time}}">
+              <button id="btn-set" type="button" class="btn btn-dark">Set</button>
+            </div>
+
+            <br>
             <button id="btn-undo" type="button" class="btn btn-dark">Undo</button>
         </div>
     </div>
@@ -64,12 +69,11 @@
 <script>
    $("#btn-new")
     .on("click", function(){
-        sizex = $("#sizex").val();
-        sizey = $("#sizey").val();
+        size = $("#size").val();
         $.ajax({
           url: "{{game.iid}}/new",
           type: "post",
-          data: {"x": sizex, "y": sizey},
+          data: {"x": size, "y": size},
           success: function(response) {
             $("#board").html(response);
           },

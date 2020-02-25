@@ -9,6 +9,7 @@ class AlphaBeta:
     def __init__(self, debug=False):
         self.debug = debug
         self.hashtable = {}
+        self.perft = []
 
     def __repr__(self):
         return f"AlphaBeta()"
@@ -39,6 +40,7 @@ class AlphaBeta:
         self.hashtable = {}
         self.start_time = time.time()
         self.allowed_time = allowed_time_in_s
+        self.perft = []
 
         poss_moves = board.possible_moves()
         if len(poss_moves) == 0:
@@ -50,13 +52,19 @@ class AlphaBeta:
         best_move, best_score = None, None
         while not self.time_over():
             move, score = self._maxmimize(board, -1000000, 1000000, depth)
+
+            if not self.time_over():
+                self.perft.append([f"{depth} ",
+                          f"{move} ",
+                          f"{score} ",
+                          f"{round(time.time()-self.start_time, 2)} ",
+                          f"{' - '.join([k + '=' + str(v) for k, v in sorted(self.stats.items())])} ",
+                          f"{self.get_pv(board)[:4]}",
+                                  ])
+
             if show_perft:
-                print(f"{depth} "
-                      f"- {move} "
-                      f"- {score} "
-                      f"- {round(time.time()-self.start_time, 2)} "
-                      f"- {' - '.join([k + '=' + str(v) for k, v in sorted(self.stats.items())])} "
-                      f"- {self.get_pv(board)[:4]}")
+                print("- ".join(self.perft[-1]))
+
             depth += 1
             if time.time()-self.start_time >= allowed_time_in_s:
                 break

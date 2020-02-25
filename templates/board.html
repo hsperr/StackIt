@@ -1,16 +1,44 @@
 
-<div> Player 1: Human </div>
-<div> Player 2: {{game.ai}} </div>
-<div> Current Player: <p style="color:{{game.current_player()}}">{{game.current_player()}}</p></div>
+<div> Player 1: <span style="color:{{game.COLORS[1]}}">{{game.player_names[0]}}</span> </div>
+<div> Player 2: <span style="color:{{game.COLORS[2]}}">{{game.player_names[1]}}</span> </div>
+<br>
+<div> <b> Current Player: <span style="color:{{game.current_player_color()}}">{{game.current_player()}}</span></b></div>
 
+<br>
 {% for row in game.board_to_template() %}
     {% for field in row%}
         <div class="tile" id="{{field[0]}}" style="color:{{field[1]}};clear:{{field[2]}}">{{field[3]}}</div>
     {% endfor %}
 {% endfor %}
 
-<div id="thinking"> </div>
 
+
+<div id="thinking" style="clear:left"> </div>
+
+<table class="table" id="ai_line">
+  <thead>
+    <tr>
+      <th scope="col">depth</th>
+      <th scope="col">move</th>
+      <th scope="col">score</th>
+      <th scope="col">time</th>
+      <th scope="col">principle variation</th>
+      <th scope="col">stats</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for line in game.ai.perft %}
+    <tr>
+      <td>{{line[0]}}</td>
+      <td>{{line[1]}}</td>
+      <td>{{line[2]}}</td>
+      <td>{{line[3]}}</td>
+      <td style="width: 50%">{{line[5]}}</td>
+      <td>{{line[4]}}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
 
 <script>
     var elem = document.getElementById('thinking');
@@ -18,6 +46,9 @@
     $(".tile")
     .on("click", function(){
         currentTile = $(this);
+        $('#btn-set').prop('disabled', true);
+        $('#btn-new').prop('disabled', true);
+        $('#btn-undo').prop('disabled', true);
         $.ajax({
           url: "{{game.iid}}/move",
           type: "post",
@@ -25,6 +56,7 @@
           success: function(response) {
             $("#board").html(response);
 
+            $("#ai_line tr").remove();
             var timeLeft = {{game.thinking_time}};
             var timerId = setInterval(countdown, 1000);
                 function countdown() {
@@ -32,7 +64,7 @@
                     clearTimeout(timerId);
                     doSomething();
                   } else {
-                    elem.innerHTML = timeLeft + ' seconds remaining';
+                    elem.innerHTML = 'Computer is thinking: ' + timeLeft + ' seconds remaining';
                     timeLeft--;
                   }
                 }
@@ -43,6 +75,9 @@
               data: {},
               success: function(response) {
                 $("#board").html(response);
+                $('#btn-set').prop('disabled', false);
+                $('#btn-new').prop('disabled', false);
+                $('#btn-undo').prop('disabled', false);
               },
               error: function(xhr) {
                 //Do Something to handle error
