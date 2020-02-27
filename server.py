@@ -17,10 +17,10 @@ class Game:
     def __init__(self, iid: str, board: Board, ai: str, thinking_time: int):
         self.iid = iid
         self.board = board
-        self.ai = ai
         self.alphaBeta = AlphaBeta()
         self.mcts = MonteCarloTreeSearch()
         self.player_names = ["HUMAN", str(ai)]
+        self.set_ai(ai)
         self.thinking_time = thinking_time
         self.max_depth = 30
         self.last_move = []
@@ -37,7 +37,7 @@ class Game:
         return 'selected' if not self.is_alpha() else ''
 
     def is_alpha(self):
-        return 'selected' if "Alpha" in self.player_names[-1] else ''
+        return 'selected' if self.ai == Game.ALPHA_BETA else ''
 
     def get_best_move(self):
         if self.ai == Game.ALPHA_BETA:
@@ -92,7 +92,7 @@ class Game:
         return self.last_move_score[-1] if len(self.last_move_score)>0 else ''
 
     def perft(self):
-        if self.ai == AlphaBeta:
+        if self.ai == Game.ALPHA_BETA:
             return self.alphaBeta.perft
         else:
             return self.mcts.perft
@@ -101,13 +101,13 @@ class Game:
 def index():
     import uuid
     iid = str(uuid.uuid1())
-    games[iid] = Game(iid, Board(), AlphaBeta(), 20)
+    games[iid] = Game(iid, Board(), Game.ALPHA_BETA, 20)
     return redirect(f"/game/{iid}")
 
 @app.route('/game/<iid>')
 def main(iid):
     if not iid in games:
-        games[iid] = Game(iid, Board(), AlphaBeta(), 20)
+        games[iid] = Game(iid, Board(), Game.ALPHA_BETA, 20)
     game = games[iid]
     return render_template('index.html', game=game)
 
