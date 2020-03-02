@@ -9,6 +9,10 @@ class AlphaBeta:
     def __init__(self, debug=False):
         self.debug = debug
         self.hashtable = {}
+        self.perft = []
+
+    def __repr__(self):
+        return f"AlphaBeta()"
 
     def get_pv(self, board):
         pv = []
@@ -17,11 +21,11 @@ class AlphaBeta:
         while True:
             entry = self.hashtable.get(board.hash(), None)
             if entry:
-                cnt +=1
                 hash_depth, hash_move, hash_alpha, hash_beta, hash_type, _ = entry
                 pv.append(hash_move)
                 if not hash_move in board.possible_moves():
                     break
+                cnt +=1
                 board.move(*hash_move)
             else:
                 break
@@ -31,48 +35,43 @@ class AlphaBeta:
 
         return pv
 
-    def get_best_move_time(self, board, allowed_time_in_s, show_perft=False):
+    def get_best_move(self, board, thinking_time=30, max_depth=1000000, show_perft=False):
         self.stats = defaultdict(int)
         self.hashtable = {}
         self.start_time = time.time()
-        self.allowed_time = allowed_time_in_s
+        self.allowed_time = thinking_time
+        self.perft = []
+
+        poss_moves = board.possible_moves()
+        if len(poss_moves) == 0:
+            return None, None
+        if len(poss_moves) == 1:
+            return poss_moves[0], 0
 
         depth = 0
         best_move, best_score = None, None
-        while not self.time_over():
+        while not self.time_over() and depth<=max_depth:
             move, score = self._maxmimize(board, -1000000, 1000000, depth)
+
+            if not self.time_over():
+                self.perft.append([f"{depth} ",
+                          f"{move} ",
+                          f"{score} ",
+                          f"{round(time.time()-self.start_time, 2)} ",
+                          f"{' - '.join([k + '=' + str(v) for k, v in sorted(self.stats.items())])} ",
+                          f"{self.get_pv(board)[:4]}",
+                                  ])
+
             if show_perft:
-                print(f"{depth} "
-                      f"- {move} "
-                      f"- {score} "
-                      f"- {round(time.time()-self.start_time, 2)} "
-                      f"- {' - '.join([k + '=' + str(v) for k, v in sorted(self.stats.items())])} "
-                      f"- {self.get_pv(board)[:4]}")
+                print("- ".join(self.perft[-1]))
+
             depth += 1
-            if time.time()-self.start_time >= allowed_time_in_s:
+            if time.time()-self.start_time >= thinking_time:
                 break
 
             best_move, best_score = move, score
 
         return best_move, best_score
-
-    def get_best_move_depth(self, board, depth, show_perft=False):
-        self.stats = defaultdict(int)
-        self.hashtable = {}
-        self.start_time = time.time()
-        self.allowed_time = None
-
-        for i in range(depth+1):
-            move, score = self._maxmimize(board, -1000000, 1000000, i)
-            if show_perft:
-                print(f"{i} "
-                      f"- {move} "
-                      f"- {score} "
-                      f"- {round(time.time()-self.start_time, 2)} "
-                      f"- {' - '.join([k + '=' + str(v) for k, v in sorted(self.stats.items())])} "
-                      f"- {self.get_pv(board)}")
-
-        return move, score
 
     def time_over(self):
         return self.allowed_time and time.time()-self.start_time>self.allowed_time

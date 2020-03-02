@@ -36,7 +36,7 @@ def run_game():
                 cmd, size_x, size_y = command.split(' ')
                 board = Board(int(size_x), int(size_y))
         elif command == 'search':
-            move, score = AlphaBeta().get_best_move_depth(board, THINKING_TIME, show_perft=True)
+            move, score = AlphaBeta().get_best_move(board, thinking_time=THINKING_TIME, show_perft=True)
         elif command.startswith('set'):
             if command == 'set':
                 print("Usage: set <player_number> <player_type>")
@@ -48,13 +48,13 @@ def run_game():
                 elif player_type == 'alpha':
                     PLAYERS[int(player)] = AlphaBeta()
                 elif player_type == 'mcts':
-                    PLAYERS[int(player)] = MonteCarloTreeSearch(max_moves=20)
+                    PLAYERS[int(player)] = MonteCarloTreeSearch()
         else:
             if PLAYERS[board.current_player] == HUMAN:
                 split_move = (int(x) for x in command.split(' '))
                 board.move(*split_move, display=True)
             else:
-                move, score = PLAYERS[board.current_player].get_best_move_time(board, THINKING_TIME, show_perft=True)
+                move, score = PLAYERS[board.current_player].get_best_move(board, thinking_time=THINKING_TIME, max_depth=20, show_perft=True)
                 print(f"Player {board.current_player}, move: {move}")
                 board.move(*move, display=True)
 

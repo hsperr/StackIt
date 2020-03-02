@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>StackIt</title>
+    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css">
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+    <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.min.js"></script>
+<style>
+.tile
+{
+	width: 32px;
+	height: 32px;
+	float: left;
+	text-align: center;
+	vertical-align: middle;
+}
+.solid_tile_bottom
+{
+	width: 32px;
+	height: 32px;
+	float: left;
+	text-align: center;
+	vertical-align: middle;
+	border-top-style: dotted;
+}
+.solid_tile_left
+{
+	width: 32px;
+	height: 32px;
+	float: left;
+	text-align: center;
+	vertical-align: middle;
+	border-right-style: dotted;
+}
+.solid_tile_top
+{
+	width: 32px;
+	height: 32px;
+	float: left;
+	text-align: center;
+	vertical-align: middle;
+	border-bottom-style: dotted;
+}
+.solid_tile_right
+{
+	width: 32px;
+	height: 32px;
+	float: left;
+	text-align: center;
+	vertical-align: middle;
+	border-left-style: dotted;
+}
+.hover
+{
+	-webkit-box-shadow: inset 0px 0px 5px 5px rgba(50, 150, 25, .5);
+	box-shadow: inset 0px 0px 5px 5px rgba(50, 150, 25, .5);
+}
+
+</style>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+</head>
+<body>
+
+<div class="jumbotron text-center" style="margin-bottom:0">
+  <h1>StackIt</h1>
+</div>
+
+<div class="container">
+  <div class="row">
+    <div class="col-sm-4">
+        <h3>Menu</h3>
+        <div id="Menu">
+            <div class="input-group mb-3">
+
+                <div class="input-group-prepend">
+                    <span class="input-group-text" id="label_size">Board Size:</span>
+                </div>
+                <input type="text" class="form-control" id="size" aria-describedby="" value="{{game.board.size_x}}">
+                <button id="btn-new" type="button" class="btn btn-dark">New</button>
+            </div>
+            <br>
+
+            <div class="input-group mb-1">
+              <div class="input-group-prepend">
+                <span class="input-group-text" id="basic-addon1">AI thinking time:</span>
+              </div>
+              <input type="text" class="form-control" id="thinking_time" aria-describedby="" value="{{game.thinking_time}}">
+            </div>
+            <div class="input-group mb-1">
+              <div class="input-group-prepend">
+                <span class="input-group-text" id="basic-addon2">AI max depth:</span>
+              </div>
+              <input type="text" class="form-control" id="max_depth" aria-describedby="" value="{{game.max_depth}}">
+            </div>
+            <div class="input-group mb-1">
+              <div class="input-group-prepend">
+                  <span class="input-group-text" id="basic-addon3">AI:</span>
+              </div>
+              <select id="ais">
+                <option value="alpha" {{game.is_alpha()}}>AlphaBeta</option>
+                <option value="mcts" {{game.is_mcts()}}>MonteCarloTreeSearch</option>
+              </select>
+                <button id="btn-set" type="button" class="btn btn-dark">Set</button>
+            </div>
+
+
+            <br>
+            <button id="btn-undo" type="button" class="btn btn-dark">Undo</button>
+        </div>
+    </div>
+    <div class="col-sm-8">
+        <div id="board">
+        {% include 'board.html' %}
+        </div>
+    </div>
+  </div>
+</div>
+
+</body>
+<script>
+   $("#btn-new")
+    .on("click", function(){
+        size = $("#size").val();
+        $.ajax({
+          url: "{{game.iid}}/new",
+          type: "post",
+          data: {"x": size, "y": size},
+          success: function(response) {
+            $("#board").html(response);
+          },
+          error: function(xhr) {
+            //Do Something to handle error
+          }
+        });
+    })
+
+    $("#btn-set")
+    .on("click", function(){
+        thinking_time = $("#thinking_time").val();
+        max_depth = $("#max_depth").val();
+        ai = $("#ais").val();
+        $.ajax({
+          url: "{{game.iid}}/set",
+          type: "post",
+          data: {"thinking_time": thinking_time, "ai": ai, "max_depth": max_depth},
+          success: function(response) {
+            $("#board").html(response);
+          },
+          error: function(xhr) {
+             //Do Something to handle error
+          }
+        });
+    })
+
+    $("#btn-undo")
+    .on("click", function(){
+        $.ajax({
+          url: "{{game.iid}}/undo",
+          type: "post",
+          data: {},
+          success: function(response) {
+            $("#board").html(response);
+            clearAI();
+          },
+          error: function(xhr) {
+            //Do Something to handle error
+          }
+        });
+    })
+</script>
+
+</html>

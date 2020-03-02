@@ -4,15 +4,19 @@ import math
 
 class MonteCarloTreeSearch:
 
-    def __init__(self, max_moves=100000):
+    def __init__(self):
         self.states = []
-        self.max_moves = max_moves
 
         self.plays = {}
         self.wins = {}
+        self.perft = []
 
-    def get_best_move_time(self, board, allowed_time_in_s, show_perft=False):
-        print(f"MCTS with time={allowed_time_in_s} and max_moves={self.max_moves}")
+    def __repr__(self):
+        return 'MonteCarloTreeSearch()'
+
+    def get_best_move(self, board, thinking_time=30, max_depth=100000, show_perft=False):
+        print(f"MCTS with time={thinking_time} and max_moves={max_depth}")
+        self.perft = []
         poss_moves = board.possible_moves()
         if not poss_moves:
             return
@@ -21,19 +25,29 @@ class MonteCarloTreeSearch:
 
         start_time = time.time()
         games = 0
-        while time.time() - start_time < allowed_time_in_s:
-            self._run_simulation(board.copy())
+        while time.time() - start_time < thinking_time:
+            self._run_simulation(board.copy(), max_depth)
             games += 1
 
         player = board.current_player
         board_string = board.to_string()
         next_states = [(player, board_string, move) for move in poss_moves]
 
-        print(games)
         rates = sorted((self.wins.get(S, 0) / float(self.plays.get(S, 1)), S, self.plays.get(S, 0)) for S in next_states)
-        for pct_win, state, plays in rates:
+        for pct_win, state, plays in reversed(rates):
             move = state[-1]
-            print(pct_win, move, self.get_pv(board.copy(), state))
+            self.perft.append([
+                max_depth,
+                move,
+                pct_win,
+                thinking_time,
+                f"num_games={plays}, total_games={games}",
+                [x[0] for x in self.get_pv(board.copy(), state)]
+            ])
+
+        if show_perft:
+            print(f"Num games: {games}")
+            print('\n'.join([' '.join([str(y) for y in x]) for x in self.perft]))
 
         score, state, _ = max(rates)
         return state[-1], score
@@ -55,7 +69,7 @@ class MonteCarloTreeSearch:
 
         return []
 
-    def _run_simulation(self, board):
+    def _run_simulation(self, board, max_depth):
 
         expand = True
         visits = []
@@ -63,7 +77,7 @@ class MonteCarloTreeSearch:
         plays, wins = self.plays, self.wins
 
         player = board.current_player
-        for m in range(self.max_moves):
+        for m in range(max_depth):
             poss_moves = board.possible_moves()
 
             board_string = board.to_string()
@@ -123,7 +137,12 @@ if __name__=='__main__':
     board.print()
 
     mcts = MonteCarloTreeSearch()
-    mcts.get_best_move_time(board, 60)
+    mcts.get_best_move(board, 1, show_perft=True)
+
+    from alphabeta import AlphaBeta
+
+    alpha = AlphaBeta()
+    alpha.get_best_move(board, thinking_time=30, show_perft=True)
 
 
 
