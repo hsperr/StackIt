@@ -1,4 +1,3 @@
-from copy import deepcopy
 from utils import StackItException
 import math
 import time
@@ -55,10 +54,11 @@ class Board:
 
     @classmethod
     def from_custom_board(cls, board, player, current_player=1):
-        import copy
         instance = cls()
-        instance.board = copy.deepcopy(board)
-        instance.player = copy.deepcopy(player)
+        # Row-slice copy: fully independent (ints are immutable) and much
+        # cheaper than deepcopy for this list-of-lists-of-ints shape.
+        instance.board = [row[:] for row in board]
+        instance.player = [row[:] for row in player]
         instance.current_player = current_player
         return instance
 
@@ -86,35 +86,46 @@ class Board:
             return 1
 
     def flip(self):
-        b = Board()
+        # Bypass __init__ so we don't allocate two zero grids only to discard
+        # them; these symmetry boards are used purely for hashing.
+        b = Board.__new__(Board)
         b.current_player = self.current_player
         b.board = self.board[::-1]
         b.player = self.player[::-1]
+        b.history = []
         return b
 
     def rotate(self):
-        b = Board()
+        b = Board.__new__(Board)
         b.current_player = self.current_player
         b.board = [list(x) for x in zip(*self.board[::-1])]
         b.player = [list(x) for x in zip(*self.player[::-1])]
+        b.history = []
         return b
 
     def possible_attack_moves(self):
         moves = []
-        for y, row in enumerate(self.board):
-            for x, field in enumerate(row):
-                if self.player[y][x] == self.current_player and field == 4:
+        cur = self.current_player
+        for y, (brow, prow) in enumerate(zip(self.board, self.player)):
+            for x, field in enumerate(brow):
+                if prow[x] == cur and field == 4:
                     moves.append((x, y))
         return moves
 
     def possible_moves(self):
+        # Hoist the size/current_player lookups out of the inner loop and walk
+        # the board/player grids together to avoid repeated double-indexing and
+        # @property (len) calls. Output order is byte-for-byte identical.
+        cur = self.current_player
+        hx = len(self.board[0]) // 2
+        hy = len(self.board) // 2
         moves = []
-        for y, row in enumerate(self.board):
-            for x, field in enumerate(row):
-                if not self.player[y][x] or self.player[y][x] == self.current_player:
-                    moves.append((field if field else 3 + (abs(x-self.size_x//2) + abs(y-self.size_y//2))/10, x, y))
+        for y, (brow, prow) in enumerate(zip(self.board, self.player)):
+            for x, (field, p) in enumerate(zip(brow, prow)):
+                if not p or p == cur:
+                    moves.append((field if field else 3 + (abs(x - hx) + abs(y - hy)) / 10, x, y))
         moves.sort()
-        return [(x[-2], x[-1]) for x in moves]
+        return [(m[1], m[2]) for m in moves]
 
     def boxes_for(self, player):
         boxes = 0
@@ -134,12 +145,18 @@ class Board:
         return 0 <= x < len(self.board[0]) and 0 <= y < len(self.board)
 
     def winning_player(self):
-        if all(x == 1 for row in self.player for x in row):
-            return 1
-        if all(x == 2 for row in self.player for x in row):
-            return 2
-        else:
-            return 0
+        # Single pass instead of two full scans: track whether the grid is
+        # all-1s / all-2s and bail out as soon as neither is possible.
+        p1 = p2 = True
+        for row in self.player:
+            for v in row:
+                if v != 1:
+                    p1 = False
+                if v != 2:
+                    p2 = False
+                if not p1 and not p2:
+                    return 0
+        return 1 if p1 else (2 if p2 else 0)
 
     def _throw_over(self, x, y):
         self.board[y][x] -= 4
@@ -180,10 +197,13 @@ class Board:
         if self.player[y][x] and not self.player[y][x] == self.current_player:
             raise StackItException(f"Cannot move ontop of other player (current_player={self.current_player}, x={x}, y={y}, field={self.player[y][x]})")
 
+        # Grids are lists-of-lists-of-ints, so a per-row slice copy produces a
+        # fully independent snapshot far faster than copy.deepcopy (which walks
+        # the object graph via reflection). This is the hottest path in search.
         self.history.append((
             self.current_player,
-            deepcopy(self.board),
-            deepcopy(self.player)
+            [row[:] for row in self.board],
+            [row[:] for row in self.player]
         ))
 
         if self.board[y][x] == 0:

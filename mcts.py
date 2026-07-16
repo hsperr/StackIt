@@ -84,19 +84,24 @@ class MonteCarloTreeSearch:
             next_states = [(player, board_string, move) for move in poss_moves]
             if all(state in plays for state in next_states):
                 next_moves = []
+                # s_p is the same for every state in this loop; hoist it out of
+                # the loop (was O(n^2) over next_states).
+                s_p = sum(plays[s] for s in next_states)
+                log_s_p = math.log(s_p)
                 for state in next_states:
                     _, _, move = state
                     s_i = plays[state]
                     w_i = wins[state]
-                    s_p = sum(plays[s] for s in next_states)
-                    r = w_i/s_i + 1.4 * math.sqrt(math.log(s_p)/s_i)
+                    r = w_i/s_i + 1.4 * math.sqrt(log_s_p/s_i)
                     next_moves.append((r, move))
 
                 _, move = sorted(next_moves)[-1]
             else:
                 move = random.choice(poss_moves)
 
-            state = (player, board.to_string(), move)
+            # board is unchanged since board_string was computed above, so reuse
+            # it instead of calling to_string() a second time.
+            state = (player, board_string, move)
             board.move(*move)
 
             if expand and not state in plays:
