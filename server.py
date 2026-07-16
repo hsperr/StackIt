@@ -17,7 +17,7 @@ class Game:
     ALPHA_BETA = 'alpha'
     MCTS = 'mcts'
 
-    COLORS = ['black', 'green', 'red']
+    COLORS = ['empty', 'p1', 'p2']  # owner tokens (0=empty,1=player1,2=player2); real colors live in CSS
 
     def __init__(self, iid: str, board: Board, ai: str, thinking_time: int):
         self.iid = iid

@@ -1,139 +1,82 @@
+{% set cur = game.current_player_color() %}
+{% set win = game.board.winning_player() %}
+{% set lm = game.get_last_move() %}
 
-<div> Player 1: <span style="color:{{game.COLORS[1]}}">{{game.player_names[0]}}</span> </div>
-<div> Player 2: <span style="color:{{game.COLORS[2]}}">{{game.player_names[1]}}</span> </div>
-<br>
-<div> <b> Current Player: <span style="color:{{game.current_player_color()}}">{{game.current_player()}}</span></b></div>
-<div> <b> Last move: {{game.get_last_move()}} - {{game.get_last_move_score()}}</span></b></div>
+<div id="banner" class="banner"><span class="emoji">&#127881;</span><span class="msg"></span></div>
 
-<br>
+<div class="scoreboard">
+    <div class="pcard {{ 'active' if cur == 'p1' else '' }}" id="pcard-p1" data-p="p1">
+        <span class="turn-badge">Turn</span>
+        <span class="dot"></span>
+        <span class="meta">
+            <span class="who">You &middot; P1</span>
+            <span class="name">{{ game.player_names[0] }}</span>
+        </span>
+        <span class="tally" id="tally-p1">0</span>
+    </div>
+    <div class="pcard {{ 'active' if cur == 'p2' else '' }}" id="pcard-p2" data-p="p2">
+        <span class="turn-badge">Turn</span>
+        <span class="dot"></span>
+        <span class="meta">
+            <span class="who">AI &middot; P2</span>
+            <span class="name">{{ game.player_names[1] }}</span>
+        </span>
+        <span class="tally" id="tally-p2">0</span>
+    </div>
+</div>
 
-<div class="solid_tile_top" style="color:grey;clear:"></div>
-{% for row in game.board_to_template() %}
-    <div class="solid_tile_top" style="color:grey;clear:">{{loop.index-1}}</div>
-{% endfor %}
-<div class="solid_tile_top" style="color:grey;clear:"></div>
+<div class="card board-stage">
+    <div id="board-grid"
+         style="--cols:{{ game.board.size_x }}"
+         data-current="{{ cur }}"
+         data-win="{{ win }}"
+         data-thinking="{{ game.thinking_time }}"
+         data-lm="{% if lm != '' %}{{ lm[0] }}-{{ lm[1] }}{% endif %}">
+        {% for row in game.board_to_template() %}
+            {% for field in row %}
+                <div class="cell" id="{{ field[0] }}"
+                     data-owner="{{ field[1] }}"
+                     data-value="{{ field[3] }}"
+                     style="--v:{{ field[3] }}">
+                    <span class="pip">{{ field[3] if field[3] else '' }}</span>
+                </div>
+            {% endfor %}
+        {% endfor %}
+    </div>
+</div>
 
-{% for row in game.board_to_template() %}
-    <div class="solid_tile_left" style="color:grey;clear:left">{{loop.index-1}}</div>
-    {% for field in row%}
-        <div class="tile" id="{{field[0]}}" style="color:{{field[1]}};clear:">{{field[3]}}</div>
-    {% endfor %}
-    <div class="solid_tile_right" style="color:grey;clear:">{{loop.index-1}}</div>
-{% endfor %}
+<div class="status-line" id="status">
+    <span class="spinner"></span>
+    <span id="status-text"></span>
+    <span style="margin-left:auto">Last move: {{ lm if lm != '' else '—' }}{% if game.get_last_move_score() != '' %} &middot; score {{ game.get_last_move_score() }}{% endif %}</span>
+</div>
 
-<div class="solid_tile_bottom" style="color:grey;clear:left"></div>
-{% for row in game.board_to_template() %}
-        <div class="solid_tile_bottom" style="color:grey;clear:">{{loop.index-1}}</div>
-{% endfor %}
-<div class="solid_tile_bottom" style="color:grey;clear"></div>
-
-
-<br style="clear:left">
-
-<div id="thinking" style="clear:left"> </div>
-
-<br>
-<table class="table">
-  <thead>
-    <tr>
-      <th scope="col">depth</th>
-      <th scope="col">move</th>
-      <th scope="col">score</th>
-      <th scope="col">time</th>
-      <th scope="col">principle variation</th>
-      <th scope="col">stats</th>
-    </tr>
-  </thead>
-  <tbody id="ai_line">
-  {% for line in game.perft() %}
-    <tr>
-      <td>{{line[0]}}</td>
-      <td>{{line[1]}}</td>
-      <td>{{line[2]}}</td>
-      <td>{{line[3]}}</td>
-      <td style="width: 50%">{{line[5]}}</td>
-      <td>{{line[4]}}</td>
-    </tr>
-  {% endfor %}
-  </tbody>
-</table>
-
-<script>
-    var elem = document.getElementById('thinking');
-
-    function disableButtons(value) {
-        $('#btn-set').prop('disabled', value);
-        $('#btn-new').prop('disabled', value);
-        $('#btn-undo').prop('disabled', value);
-    }
-
-    function startTimeout(timeLeft) {
-        elem.innerHTML = 'Computer is thinking: ' + timeLeft + ' seconds remaining';
-
-
-        function countdown() {
-          if (timeLeft == 0) {
-            clearTimeout(timerId);
-          } else {
-            elem.innerHTML = 'Computer is thinking: ' + timeLeft + ' seconds remaining';
-            timeLeft--;
-          }
-        }
-
-        var timerId = setInterval(countdown, 1000);
-        return timerId
-    }
-
-    function clearAI() {
-      $("#ai_line tr").remove();
-    }
-
-    function queryAI() {
-        clearAI();
-
-        var timerId = startTimeout({{game.thinking_time}});
-
-        $.ajax({
-          url: "{{game.iid}}/move",
-          type: "get",
-          data: {},
-          success: function(response) {
-            $("#board").html(response);
-            disableButtons(false);
-            clearTimeout(timerId);
-
-          },
-          error: function(xhr) {
-            //Do Something to handle error
-            disableButtons(false);
-          }
-        });
-    }
-
-    $(".tile")
-    .on("click", function(){
-        currentTile = $(this);
-        disableButtons(true);
-        $.ajax({
-          url: "{{game.iid}}/move",
-          type: "post",
-          data: {"move": currentTile.attr('id')},
-          success: function(response) {
-            $("#board").html(response);
-            queryAI();
-          },
-          error: function(xhr) {
-            //Do Something to handle error
-          }
-        });
-    })
-    .on('mouseenter',function(){
-		$(this).addClass('hover');
-	})
-
-	.on('mouseleave',function(){
-		$(this).removeClass('hover');
-	});
-
-
-</script>
+<details class="analysis card panel">
+    <summary>AI search analysis</summary>
+    <div class="table-scroll">
+        <table class="perft">
+            <thead>
+                <tr>
+                    <th>depth</th>
+                    <th>move</th>
+                    <th>score</th>
+                    <th>time</th>
+                    <th>principal variation</th>
+                    <th>stats</th>
+                </tr>
+            </thead>
+            <tbody id="ai_line">
+                {% for line in game.perft() %}
+                    <tr>
+                        <td>{{ line[0] }}</td>
+                        <td>{{ line[1] }}</td>
+                        <td>{{ line[2] }}</td>
+                        <td>{{ line[3] }}</td>
+                        <td class="pv">{{ line[5] }}</td>
+                        <td>{{ line[4] }}</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</details>
