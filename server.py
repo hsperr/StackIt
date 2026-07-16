@@ -5,6 +5,11 @@ from mcts import MonteCarloTreeSearch
 
 app = Flask(__name__)
 
+# NOTE: this dict grows unbounded — every visit to `/` mints a new uuid1 and
+# adds a new Game entry that is never evicted, so long-running server
+# processes will leak memory. No eviction/TTL implemented here; consider
+# adding an LRU cap or session TTL if this ever runs as a long-lived,
+# publicly reachable service.
 games = {}
 
 
@@ -76,14 +81,18 @@ class Game:
        return self.board.move(x, y)
 
     def undo(self):
-        self.board.undo()
-        self.board.undo()
+        # Undo up to 2 half-moves (human + AI) but never more than what's
+        # actually in history, so undoing right after the first move (or
+        # with no moves made) doesn't crash on an empty history/list.
+        undo_count = min(2, len(self.board.history))
+        for _ in range(undo_count):
+            self.board.undo()
 
-        self.last_move_score.pop()
-        self.last_move_score.pop()
+        for _ in range(min(undo_count, len(self.last_move_score))):
+            self.last_move_score.pop()
 
-        self.last_move.pop()
-        self.last_move.pop()
+        for _ in range(min(undo_count, len(self.last_move))):
+            self.last_move.pop()
 
     def get_last_move(self):
         return self.last_move[-1] if len(self.last_move)>0 else ''

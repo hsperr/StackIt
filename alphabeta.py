@@ -1,6 +1,20 @@
 from collections import defaultdict
 import time
 
+
+def rotate_move(p, x, y):
+    """Coordinates of move p=(x,y) after board.rotate() (a 90 degree
+    rotation via transpose+row-reverse). `x`/`y` must be the *new*
+    (already-rotated) board's size_x/size_y."""
+    return (x - 1 - p[1], p[0])
+
+
+def flip_move(p, x, y):
+    """Coordinates of move p=(x,y) after board.flip() (row order
+    reversed, dimensions unchanged)."""
+    return (p[0], y - 1 - p[1])
+
+
 class AlphaBeta:
     EXACT_MATCH = 1
     UPPERBOUND = 2
@@ -206,44 +220,44 @@ class AlphaBeta:
 
             self.hashtable[board.hash()] = (depth, best_move, alpha, beta, hash_type, board.to_string())
 
-            def rotate(p, x, y):
-                if p[0] > x // 2 and p[1] > y // 2:
-                    return [x - p[0] - 1, p[1]]
-                if p[0] <= x // 2 and p[1] > y // 2:
-                    return [p[0], y - p[1] - 1]
-                if p[0] > x // 2 and p[1] <= y // 2:
-                    return [p[0], y - p[1] - 1]
-                if p[0] <= x // 2 and p[1] <= y // 2:
-                    return [x - p[0] - 1, p[1]]
+            # Also store this evaluation under the hashes of the 7 other
+            # boards that are symmetric to this one (3 rotations, a flip,
+            # and the flip's 3 rotations), so a transposition into any of
+            # those equivalent orientations can reuse it. `best_move` must
+            # be transformed into each orientation's own coordinates too -
+            # storing it unrotated (or rotating some unrelated stale value)
+            # would hand back a move that is invalid, or silently wrong, for
+            # the board actually being searched.
+            if best_move is not None:
+                sym_move = best_move
 
-            board = board.rotate()
-            move = rotate(move, board.size_x, board.size_y)
-            self.hashtable[board.hash()] = (depth, best_move, alpha, beta, hash_type, board.to_string())
+                board = board.rotate()
+                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
+                self.hashtable[board.hash()] = (depth, sym_move, alpha, beta, hash_type, board.to_string())
 
-            board = board.rotate()
-            move = rotate(move, board.size_x, board.size_y)
-            self.hashtable[board.hash()] = (depth, best_move, alpha, beta, hash_type, board.to_string())
+                board = board.rotate()
+                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
+                self.hashtable[board.hash()] = (depth, sym_move, alpha, beta, hash_type, board.to_string())
 
-            board = board.rotate()
-            move = rotate(move, board.size_x, board.size_y)
-            self.hashtable[board.hash()] = (depth, best_move, alpha, beta, hash_type, board.to_string())
+                board = board.rotate()
+                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
+                self.hashtable[board.hash()] = (depth, sym_move, alpha, beta, hash_type, board.to_string())
 
-            board = board.flip()
-            move = rotate(move, board.size_x, board.size_y)
-            move = rotate(move, board.size_x, board.size_y)
-            self.hashtable[board.hash()] = (depth, best_move, alpha, beta, hash_type, board.to_string())
+                board = board.flip()
+                sym_move = flip_move(sym_move, board.size_x, board.size_y)
+                self.hashtable[board.hash()] = (depth, sym_move, alpha, beta, hash_type, board.to_string())
 
-            board = board.rotate()
-            move = rotate(move, board.size_x, board.size_y)
-            self.hashtable[board.hash()] = (depth, best_move, alpha, beta, hash_type, board.to_string())
+                board = board.rotate()
+                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
+                self.hashtable[board.hash()] = (depth, sym_move, alpha, beta, hash_type, board.to_string())
 
-            board = board.rotate()
-            move = rotate(move, board.size_x, board.size_y)
-            self.hashtable[board.hash()] = (depth, best_move, alpha, beta, hash_type, board.to_string())
+                board = board.rotate()
+                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
+                self.hashtable[board.hash()] = (depth, sym_move, alpha, beta, hash_type, board.to_string())
 
-            board = board.rotate()
-            move = rotate(move, board.size_x, board.size_y)
-            self.hashtable[board.hash()] = (depth, best_move, alpha, beta, hash_type, board.to_string())
+                board = board.rotate()
+                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
+                self.hashtable[board.hash()] = (depth, sym_move, alpha, beta, hash_type, board.to_string())
 
 
         return best_move, best_score

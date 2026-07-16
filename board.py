@@ -40,7 +40,12 @@ class Board:
         return instance
 
     def to_string(self):
-        return ''.join([str(x) for x in [self.current_player] + self.board + self.player])
+        cells = []
+        for y, row in enumerate(self.board):
+            for x, field in enumerate(row):
+                cells.append(str(field))
+                cells.append(str(self.player[y][x]))
+        return str(self.current_player) + ''.join(cells)
 
     def hash(self):
         return hash(self.to_string())
@@ -164,6 +169,8 @@ class Board:
         return fields
 
     def undo(self):
+        if not self.history:
+            raise StackItException("Cannot undo, no moves have been made")
         current_player, board, player = self.history.pop()
         self.current_player = current_player
         self.board = board
@@ -186,7 +193,7 @@ class Board:
 
         self.player[y][x] = self.current_player
 
-        if self.board[y][x] == 5:
+        if self.board[y][x] >= 5:
             self._throw_over(x, y)
             if display:
                 self.print()

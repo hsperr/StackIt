@@ -19,9 +19,9 @@ class MonteCarloTreeSearch:
         self.perft = []
         poss_moves = board.possible_moves()
         if not poss_moves:
-            return
+            return None, None
         if len(poss_moves) == 1:
-            return poss_moves[0]
+            return poss_moves[0], 0
 
         start_time = time.time()
         games = 0

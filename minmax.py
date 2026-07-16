@@ -23,6 +23,7 @@ class MinMax:
         best_score = -10000000
         best_move = None
         local_pv = []
+        principle_variation = []
 
         for move in board.possible_moves():
             board.move(*move)
