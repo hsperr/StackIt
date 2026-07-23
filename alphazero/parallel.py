@@ -1,0 +1,143 @@
+"""Play independent games across CPU cores with a process pool.
+
+Self-play and evaluation are both just "play N independent games", and on this
+machine that's ~85% of an iteration's wall-clock. MCTS is single-threaded Python
+(GIL-bound), so real parallelism means separate processes. Each worker rebuilds
+the net on CPU with 1 torch thread (so 8 workers don't oversubscribe cores) and
+plays a slice of the games.
+
+The pool is created once and reused; each call ships the current net weights
+(~1MB) to the workers.
+"""
+from dataclasses import replace
+from multiprocessing import get_context
+
+import numpy as np
+import torch
+
+from board import Board
+from .config import Config
+from .net import StackNet, Evaluator
+from .selfplay import play_game, game_winner
+from .arena_eval import AZPlayer, RandomPlayer, AlphaBetaPlayer
+
+_CTX = get_context("spawn")
+_CPU = torch.device("cpu")
+
+
+def _init_worker():
+    torch.set_num_threads(1)
+
+
+def _build_net(arch, state):
+    net = StackNet(arch["board_size"], arch["channels"], arch["res_blocks"])
+    net.load_state_dict(state)
+    net.eval()
+    return net
+
+
+def _cpu_state(net):
+    return {k: v.detach().cpu() for k, v in net.state_dict().items()}
+
+
+def make_pool(n_workers):
+    return _CTX.Pool(n_workers, initializer=_init_worker)
+
+
+def _split(items, n):
+    """Round-robin split into <= n non-empty chunks (balances uneven game lengths)."""
+    chunks = [items[i::n] for i in range(n)]
+    return [c for c in chunks if c]
+
+
+# ------------------------------------------------------------------ self-play
+def _sp_chunk(payload):
+    torch.set_num_threads(1)
+    arch, state, cfg_dict, seeds = payload
+    ev = Evaluator(_build_net(arch, state), _CPU)
+    base = Config(**cfg_dict)
+    examples, last = [], None
+    for s in seeds:
+        cfg = replace(base, seed=int(s))
+        rng = np.random.default_rng(int(s))
+        ex, rec = play_game(ev, cfg, rng)
+        examples.extend(ex)
+        last = rec
+    return examples, last
+
+
+def selfplay_parallel(net, cfg, n_games, base_seed, pool, n_workers):
+    """Returns (all_examples, last_record). Examples are raw (planes, pi, z);
+    the caller applies symmetry augmentation."""
+    arch, state = net.arch(), _cpu_state(net)
+    seeds = [base_seed + i for i in range(n_games)]
+    payloads = [(arch, state, cfg.to_dict(), c) for c in _split(seeds, n_workers)]
+    examples, last = [], None
+    for ex, rec in pool.map(_sp_chunk, payloads):
+        examples.extend(ex)
+        if rec:
+            last = rec
+    return examples, last
+
+
+# ---------------------------------------------------------------------- matches
+def _match_chunk(payload):
+    torch.set_num_threads(1)
+    arch, a_state, opp, specs, board_size, max_plies, cfg_dict = payload
+    cfg = Config(**cfg_dict)
+    a_ev = Evaluator(_build_net(arch, a_state), _CPU)
+    if opp[0] == "az":
+        b_ev = Evaluator(_build_net(arch, opp[1]), _CPU)
+
+    def make_a():
+        return AZPlayer(a_ev, cfg)
+
+    def make_b():
+        if opp[0] == "az":
+            return AZPlayer(b_ev, cfg)
+        if opp[0] == "random":
+            return RandomPlayer()
+        return AlphaBetaPlayer(opp[1])              # ("alphabeta", budget)
+
+    out = []
+    for first_is_a, seed in specs:
+        rng = np.random.default_rng(int(seed))
+        pa, pb = make_a(), make_b()
+        pa.reset(); pb.reset()
+        p1, p2 = (pa, pb) if first_is_a else (pb, pa)
+        players = {1: p1, 2: p2}
+        board = Board(board_size, board_size)
+        for _ in range(max_plies):
+            if board.winning_player() or not board.possible_moves():
+                break
+            mv = players[board.current_player].move(board, rng)
+            if mv is None or tuple(mv) not in board.possible_moves():
+                break
+            board.move(*mv)
+        w = game_winner(board)
+        if w == 0:
+            out.append("draw")
+        else:
+            winner = p1 if w == 1 else p2
+            out.append("a" if winner is pa else "b")
+    return out
+
+
+def match_parallel(a_net, opp, cfg, n_games, base_seed, pool, n_workers):
+    """Play `a_net` (as player A) vs an opponent over n_games with colors
+    alternating. `opp` is ("az", state) | ("random", None) | ("alphabeta", budget).
+    Returns (wins_a, wins_b, draws)."""
+    arch, a_state = a_net.arch(), _cpu_state(a_net)
+    specs = [(g % 2 == 0, base_seed + g) for g in range(n_games)]
+    payloads = [(arch, a_state, opp, c, cfg.board_size, cfg.max_game_plies, cfg.to_dict())
+                for c in _split(specs, n_workers)]
+    wa = wb = dr = 0
+    for res in pool.map(_match_chunk, payloads):
+        for r in res:
+            if r == "a":
+                wa += 1
+            elif r == "b":
+                wb += 1
+            else:
+                dr += 1
+    return wa, wb, dr

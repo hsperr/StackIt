@@ -16,6 +16,7 @@ games = {}
 class Game:
     ALPHA_BETA = 'alpha'
     MCTS = 'mcts'
+    AZ = 'az'
 
     COLORS = ['empty', 'p1', 'p2']  # owner tokens (0=empty,1=player1,2=player2); real colors live in CSS
 
@@ -24,6 +25,7 @@ class Game:
         self.board = board
         self.alphaBeta = AlphaBeta()
         self.mcts = MonteCarloTreeSearch()
+        self.az = None                       # lazily built (needs a trained checkpoint)
         self.player_names = ["HUMAN", str(ai)]
         self.set_ai(ai)
         self.thinking_time = thinking_time
@@ -35,18 +37,28 @@ class Game:
         self.ai = ai
         if ai == Game.ALPHA_BETA:
             self.player_names[-1] = str(self.alphaBeta)
+        elif ai == Game.AZ:
+            self.player_names[-1] = 'AlphaZero'
         else:
             self.player_names[-1] = str(self.mcts)
 
     def is_mcts(self):
-        return 'selected' if not self.is_alpha() else ''
+        return 'selected' if self.ai == Game.MCTS else ''
 
     def is_alpha(self):
         return 'selected' if self.ai == Game.ALPHA_BETA else ''
 
+    def is_az(self):
+        return 'selected' if self.ai == Game.AZ else ''
+
     def get_best_move(self):
         if self.ai == Game.ALPHA_BETA:
             move, score = self.alphaBeta.get_best_move(self.board, thinking_time=self.thinking_time, max_depth=self.max_depth)
+        elif self.ai == Game.AZ:
+            if self.az is None:
+                from alphazero.engine import AlphaZero
+                self.az = AlphaZero()
+            move, score = self.az.get_best_move(self.board, thinking_time=self.thinking_time, max_depth=self.max_depth)
         else:
             move, score = self.mcts.get_best_move(self.board, thinking_time=self.thinking_time, max_depth=self.max_depth)
 

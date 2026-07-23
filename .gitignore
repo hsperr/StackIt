@@ -2,3 +2,7 @@
 __pycache__
 .tags
 .idea
+
+# AlphaZero training artifacts
+checkpoints/
+alphazero/__pycache__

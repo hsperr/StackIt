@@ -37,6 +37,7 @@
             <select id="ais">
                 <option value="alpha" {{ game.is_alpha() }}>AlphaBeta</option>
                 <option value="mcts" {{ game.is_mcts() }}>Monte Carlo Tree Search</option>
+                <option value="az" {{ game.is_az() }}>AlphaZero (trained net)</option>
             </select>
         </div>
 

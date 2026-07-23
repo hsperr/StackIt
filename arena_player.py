@@ -29,6 +29,9 @@ def build_engine(engine_name, minmax_depth):
     if engine_name == 'minmax':
         from minmax import MinMax
         return MinMax(minmax_depth)
+    if engine_name == 'alphazero':
+        from alphazero.engine import AlphaZero
+        return AlphaZero()          # loads checkpoints/best.pt (train first)
     raise ValueError(f"unknown engine: {engine_name}")
 
 
