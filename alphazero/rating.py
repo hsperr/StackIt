@@ -44,6 +44,15 @@ class ResultBook:
             s.add(b)
         return s
 
+    def games_played(self):
+        """Total games each participant has played (Elo trustworthiness)."""
+        g = {}
+        for (a, b), (wa, wb, d) in self.d.items():
+            n = wa + wb + d
+            g[a] = g.get(a, 0) + n
+            g[b] = g.get(b, 0) + n
+        return g
+
     def to_list(self):
         return [{"a": a, "b": b, "wa": r[0], "wb": r[1], "d": r[2]}
                 for (a, b), r in self.d.items()]
@@ -56,8 +65,12 @@ class ResultBook:
         return bk
 
 
-def compute_elo(book, anchor="random", anchor_elo=0.0, iters=250):
-    """Fit Bradley-Terry strengths to all recorded matches, return {id: elo}."""
+def compute_elo(book, anchor="random", anchor_elo=0.0, iters=250, prior_draws=0.0):
+    """Fit Bradley-Terry strengths to all recorded matches, return {id: elo}.
+
+    `prior_draws` adds that many virtual draws to every played pair — a mild
+    Bayesian shrink that stops a 16-0 sweep from demanding an infinite (and
+    wildly noisy) rating gap, so Elo can't run away."""
     parts = list(book.participants())
     if not parts:
         return {}
@@ -65,6 +78,7 @@ def compute_elo(book, anchor="random", anchor_elo=0.0, iters=250):
     wins = {p: 0.0 for p in parts}      # wins (draw = 0.5) per participant
     npair = {}                          # games played between each ordered pair
     for (a, b), (wa, wb, d) in book.d.items():
+        d = d + prior_draws
         wins[a] += wa + 0.5 * d
         wins[b] += wb + 0.5 * d
         n = wa + wb + d

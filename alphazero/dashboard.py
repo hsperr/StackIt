@@ -129,6 +129,11 @@ def api_status():
     return jsonify(_read_json("status.json", {"phase": "idle"}))
 
 
+@app.route("/api/ratings")
+def api_ratings():
+    return jsonify(_read_json("ratings.json", {"versions": [], "champion": None}))
+
+
 @app.route("/api/game")
 def api_game():
     """Reconstruct per-ply board frames from the stored move list by replaying
@@ -266,13 +271,13 @@ tr.rej td:first-child{box-shadow:inset 3px 0 0 var(--slot-line)}
 <div class="wrap">
   <div style="display:flex;flex-direction:column;gap:18px">
     <div class="card">
-      <h2>Elo rating <span style="text-transform:none;font-weight:500;color:#c2cbe0">· random = 0</span></h2>
+      <h2>Elo rating <span style="text-transform:none;font-weight:500;color:#c2cbe0">· AlphaBeta = 0</span></h2>
       <div class="chart" id="w-elo"><canvas id="c-elo" width="640" height="230"></canvas>
         <div class="vline"></div><div class="tip"></div></div>
       <div class="legend">
-        <span><i class="dot" style="background:var(--p1)"></i>best model</span>
-        <span><i class="dot" style="background:var(--p2)"></i>AlphaBeta</span>
-        <span><i class="dot" style="background:#dfe4ef"></i>random (0)</span>
+        <span><i class="dot" style="background:var(--good)"></i>current model</span>
+        <span><i class="dot" style="background:var(--p1)"></i>champion (best)</span>
+        <span><i class="dot" style="background:var(--p2)"></i>reference bars (dashed)</span>
       </div>
     </div>
     <div class="card">
@@ -282,6 +287,7 @@ tr.rej td:first-child{box-shadow:inset 3px 0 0 var(--slot-line)}
       <div class="legend">
         <span><i class="dot" style="background:var(--good)"></i>vs random</span>
         <span><i class="dot" style="background:var(--p2)"></i>vs AlphaBeta</span>
+        <span><i class="dot" style="background:#8b5cf6"></i><span id="leg-ref">vs reference</span></span>
         <span><i class="dot" style="background:var(--p1)"></i>gate (cand vs best)</span>
         <span><i class="dot" style="background:rgba(24,160,88,.35)"></i>accepted</span>
       </div>
@@ -322,7 +328,7 @@ tr.rej td:first-child{box-shadow:inset 3px 0 0 var(--slot-line)}
 
     <div class="logwrap">
       <table class="log">
-        <thead><tr><th>iter</th><th>elo</th><th>vs best</th><th>gate</th><th>rnd</th><th>AB</th></tr></thead>
+        <thead><tr><th>iter</th><th>elo</th><th>games</th><th>vs</th><th>gate</th><th>rnd</th><th>AB</th></tr></thead>
         <tbody id="logbody"></tbody>
       </table>
     </div>
@@ -335,11 +341,11 @@ const fmtPct=v=>v==null||isNaN(v)?'–':Math.round(v*100)+'%';
 function fmtDur(s){s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;
   return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(ss).padStart(2,'0')}s`;}
 
-let ROWS=[];
+let ROWS=[], RATINGS={versions:[]}, RATED={};
 const CHARTS={};   // canvasId -> {x0,x1,xmax}
 
 // ---------- charts ----------
-function draw(canvas, series, ymin, ymax, xmax, accepted){
+function draw(canvas, series, ymin, ymax, xmax, accepted, hlines){
   const ctx=canvas.getContext('2d'), W=canvas.width, H=canvas.height;
   const padL=38,padR=10,padT=10,padB=34;
   ctx.clearRect(0,0,W,H);
@@ -347,10 +353,15 @@ function draw(canvas, series, ymin, ymax, xmax, accepted){
   const X=t=>x0+(x1-x0)*(xmax<=1?0.5:(t-1)/(xmax-1||1));
   const Y=v=>y0+(y1-y0)*((v-ymin)/(ymax-ymin||1));
   CHARTS[canvas.id]={x0,x1,xmax};
+  const digits=(ymax-ymin)>=20?0:1;
   // horizontal grid + y labels
   ctx.strokeStyle='#eef1f9';ctx.fillStyle='#9aa3bd';ctx.font='11px system-ui';ctx.lineWidth=1;ctx.textAlign='left';
   for(let i=0;i<=4;i++){const v=ymin+(ymax-ymin)*i/4,y=Y(v);
-    ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x1,y);ctx.stroke();ctx.fillText(v.toFixed(1),4,y+3);}
+    ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x1,y);ctx.stroke();ctx.fillText(v.toFixed(digits),4,y+3);}
+  // horizontal reference lines (e.g. reference-model Elo bars to beat)
+  if(hlines)for(const h of hlines){if(h.y<ymin||h.y>ymax)continue;const y=Y(h.y);
+    ctx.strokeStyle=h.color;ctx.setLineDash([4,4]);ctx.beginPath();ctx.moveTo(x0,y);ctx.lineTo(x1,y);ctx.stroke();
+    ctx.setLineDash([]);ctx.fillStyle=h.color;ctx.textAlign='right';ctx.fillText(h.label,x1-2,y-3);ctx.textAlign='left';}
   // accepted-candidate markers (faint vertical lines)
   if(accepted){ctx.strokeStyle='rgba(24,160,88,.22)';
     for(const a of accepted){ctx.beginPath();ctx.moveTo(X(a),y0);ctx.lineTo(X(a),y1);ctx.stroke();}}
@@ -394,17 +405,21 @@ function hookHover(boxId, canvasId, fields){
 async function refreshMetrics(){
   let rows;try{rows=await(await fetch('/api/metrics')).json();}catch(e){return;}
   ROWS=rows;
+  try{RATINGS=await(await fetch('/api/ratings')).json();}catch(e){}
+  const byId={};(RATINGS.versions||[]).forEach(v=>{byId[v.id]=v;});RATED=byId;
   const xmax=Math.max(1,rows.length?rows[rows.length-1].iter:1);
-  const accepted=rows.filter(r=>r.accepted&&r.cand_winrate_vs_best!=null).map(r=>r.iter);
-  // elo chart: best-model lineage (bold) vs AlphaBeta
-  const eloB=rows.map(r=>({x:r.iter,y:r.best_elo}));
-  const eloA=rows.map(r=>({x:r.iter,y:r.elo_alphabeta}));
-  const evals=eloB.concat(eloA).map(p=>p.y).filter(v=>v!=null&&!isNaN(v));
-  let emin=Math.min(0,...evals),emax=Math.max(50,...evals);
-  const epad=(emax-emin)*0.12||40;emin-=epad;emax+=epad;
-  const zero=[{x:1,y:0},{x:xmax,y:0}];
-  draw($('c-elo'),[{color:'#dfe4ef',pts:zero},{color:css('--p1'),pts:eloB},
-     {color:css('--p2'),pts:eloA}],emin,emax,xmax,accepted);
+  const accepted=rows.filter(r=>r.accepted).map(r=>r.iter);
+  // elo chart (AlphaBeta = 0): current model + champion, with reference bars to beat
+  const eloCur=rows.map(r=>({x:r.iter,y:r.elo}));
+  const eloBest=rows.map(r=>({x:r.iter,y:r.best_elo}));
+  const refs=(RATINGS.versions||[]).filter(v=>v.ref);
+  const hlines=refs.map(v=>({y:v.elo,label:v.id.replace('ref:',''),color:'rgba(224,109,0,.7)'}));
+  const evals=eloCur.concat(eloBest).map(p=>p.y).filter(v=>v!=null&&!isNaN(v))
+                    .concat(refs.map(v=>v.elo)).concat([0]);
+  let emin=Math.min(...evals),emax=Math.max(...evals);
+  const epad=(emax-emin)*0.15||40;emin-=epad;emax+=epad;
+  draw($('c-elo'),[{color:css('--good'),pts:eloCur},{color:css('--p1'),pts:eloBest}],
+       emin,emax,xmax,accepted,hlines);
   const pol=rows.map(r=>({x:r.iter,y:r.policy_loss}));
   const val=rows.map(r=>({x:r.iter,y:r.value_loss}));
   const clean=pol.concat(val).map(p=>p.y).filter(v=>v!=null&&!isNaN(v));
@@ -412,10 +427,13 @@ async function refreshMetrics(){
   draw($('c-loss'),[{color:css('--p1'),pts:pol},{color:css('--p2'),pts:val}],0,lmax,xmax);
   const rnd=rows.map(r=>({x:r.iter,y:r.winrate_vs_random}));
   const ab=rows.map(r=>({x:r.iter,y:r.winrate_vs_alphabeta}));
+  const ref=rows.map(r=>({x:r.iter,y:r.winrate_vs_reference}));
   const gate=rows.map(r=>({x:r.iter,y:r.cand_winrate_vs_best}));
+  const refName=(rows.find(r=>r.reference_id)||{}).reference_id;
+  if(refName)$('leg-ref').textContent='vs '+refName;
   const half=[{x:1,y:0.5},{x:xmax,y:0.5}];
   draw($('c-win'),[{color:'#dfe4ef',pts:half},{color:css('--good'),pts:rnd},
-     {color:css('--p2'),pts:ab},{color:css('--p1'),pts:gate}],0,1,xmax,accepted);
+     {color:css('--p2'),pts:ab},{color:'#8b5cf6',pts:ref},{color:css('--p1'),pts:gate}],0,1,xmax,accepted);
   // counters
   const done=rows.length;
   const sumSec=rows.reduce((a,r)=>a+(r.iter_sec||0),0);
@@ -435,8 +453,11 @@ function renderTable(rows){
     const cls=gated?(r.accepted?'acc':'rej'):'';
     const tag=gated?(r.accepted?'<span class="tag acc">ACC</span>':'<span class="tag rej">rej</span>'):'';
     const gatev=gated?Math.round(r.cand_winrate_vs_best*100)+'% '+tag:'—';
-    const elo=r.elo==null?'–':Math.round(r.elo);
-    html+=`<tr class="${cls}"><td>#${r.iter}</td><td>${elo}</td><td>v${r.version??'?'}</td><td>${gatev}</td>`+
+    const live=RATED['v'+r.iter]||{};                     // latest Elo + game count
+    const elo=live.elo!=null?Math.round(live.elo):(r.elo==null?'–':Math.round(r.elo));
+    const gm=live.games!=null?live.games:'';
+    const vs=r.version==null?'?':('v'+r.version);      // previous best it was gated against
+    html+=`<tr class="${cls}"><td>#${r.iter}</td><td>${elo}</td><td>${gm}</td><td>${vs}</td><td>${gatev}</td>`+
           `<td>${fmtPct(r.winrate_vs_random)}</td><td>${fmtPct(r.winrate_vs_alphabeta)}</td></tr>`;
   }
   $('logbody').innerHTML=html;
@@ -561,15 +582,16 @@ function showStats(s){
 }
 
 hookHover('w-elo','c-elo',()=>[
-  {label:'best model',color:css('--p1'),get:r=>r.best_elo,fmt:v=>v.toFixed(0)},
-  {label:'this iter model',color:'#9aa3bd',get:r=>r.elo,fmt:v=>v.toFixed(0)},
-  {label:'AlphaBeta',color:css('--p2'),get:r=>r.elo_alphabeta,fmt:v=>v.toFixed(0)}]);
+  {label:'current model',color:css('--good'),get:r=>(RATED['v'+r.iter]||{}).elo??r.elo,fmt:v=>v.toFixed(0)},
+  {label:'champion',color:css('--p1'),get:r=>r.best_elo,fmt:v=>v.toFixed(0)},
+  {label:'games',color:'#9aa3bd',get:r=>(RATED['v'+r.iter]||{}).games,fmt:v=>String(v)}]);
 hookHover('w-loss','c-loss',()=>[
   {label:'policy',color:css('--p1'),get:r=>r.policy_loss,fmt:v=>v.toFixed(3)},
   {label:'value',color:css('--p2'),get:r=>r.value_loss,fmt:v=>v.toFixed(3)}]);
 hookHover('w-win','c-win',()=>[
   {label:'vs random',color:css('--good'),get:r=>r.winrate_vs_random,fmt:fmtPct},
   {label:'vs AlphaBeta',color:css('--p2'),get:r=>r.winrate_vs_alphabeta,fmt:fmtPct},
+  {label:'vs reference',color:'#8b5cf6',get:r=>r.winrate_vs_reference,fmt:fmtPct},
   {label:'gate',color:css('--p1'),get:r=>r.cand_winrate_vs_best,fmt:fmtPct}]);
 
 refreshMetrics();refreshStatus();refreshGame().then(renderFrame);

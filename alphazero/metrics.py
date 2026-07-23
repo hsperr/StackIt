@@ -45,6 +45,15 @@ def save_version(cfg, net, vid):
     torch.save({"arch": net.arch(), "state": state}, os.path.join(d, f"v{vid}.pt"))
 
 
+def save_champion(cfg, arch, state, champion_id, elo):
+    """Write best.pt from an arbitrary champion's arch+state (may be a reference
+    of a different architecture than the net currently training)."""
+    ensure_dir(cfg)
+    torch.save({"arch": arch, "state": state, "cfg": cfg.to_dict(),
+                "extra": {"version": champion_id, "elo": elo}},
+               os.path.join(cfg.ckpt_dir, "best.pt"))
+
+
 def load_version_state(cfg, vid):
     path = os.path.join(cfg.ckpt_dir, "versions", f"v{vid}.pt")
     return torch.load(path, map_location="cpu", weights_only=False)["state"]

@@ -14,15 +14,20 @@ class Config:
     max_game_plies: int = 60     # self-play move cap; decided by box count if hit.
 
     # --- network ---
-    channels: int = 64           # filters in the residual tower
-    res_blocks: int = 4          # number of residual blocks
+    channels: int = 96           # filters in the residual tower
+    res_blocks: int = 5          # number of residual blocks
 
     # --- MCTS ---
-    num_simulations: int = 60    # rollouts (net evals) per move — biggest quality knob
+    num_simulations: int = 96    # rollouts (net evals) per move — biggest quality knob
     c_puct: float = 1.5          # exploration constant in PUCT
     dirichlet_alpha: float = 0.6 # root noise concentration (~10/avg_moves)
-    dirichlet_eps: float = 0.25  # root noise weight (self-play only)
-    temp_moves: int = 12         # plies of tau=1 sampling before switching to argmax
+    dirichlet_eps: float = 0.30  # root noise weight (self-play only)
+    temp_moves: int = 16         # plies of tau=1 sampling before switching to argmax
+    opening_random_plies: int = 3  # uniformly-random opening moves per self-play game
+
+    # --- opponent pool (data diversity + robustness) ---
+    pool_size: int = 2           # how many recent champions to mix into self-play
+    pool_play_frac: float = 0.4  # fraction of self-play games vs a pool/reference opponent
 
     # --- self-play / training loop ---
     iterations: int = 200        # outer policy-iteration rounds
@@ -42,6 +47,7 @@ class Config:
     alphabeta_budget: float = 0.05    # seconds/move for the AlphaBeta benchmark opponent
     gauntlet_versions: int = 4   # how many past versions the best plays each iter (Elo)
     gauntlet_games: int = 4      # games vs each sampled past version
+    elo_prior_draws: float = 2.0  # virtual draws per pair — tames 100%-sweep Elo blow-ups
 
     # --- io ---
     ckpt_dir: str = "checkpoints"

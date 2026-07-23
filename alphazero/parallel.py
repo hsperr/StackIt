@@ -53,25 +53,35 @@ def _split(items, n):
 # ------------------------------------------------------------------ self-play
 def _sp_chunk(payload):
     torch.set_num_threads(1)
-    arch, state, cfg_dict, seeds = payload
+    arch, state, cfg_dict, seeds, opp_pool = payload
     ev = Evaluator(_build_net(arch, state), _CPU)
+    opp_evs = [Evaluator(_build_net(oa, os_), _CPU) for (oa, os_) in opp_pool]
     base = Config(**cfg_dict)
     examples, last = [], None
     for s in seeds:
         cfg = replace(base, seed=int(s))
         rng = np.random.default_rng(int(s))
-        ex, rec = play_game(ev, cfg, rng)
+        # a fraction of games are vs a pool opponent (diversity + robustness)
+        opp = None
+        if opp_evs and rng.random() < cfg.pool_play_frac:
+            opp = opp_evs[rng.integers(len(opp_evs))]
+        ex, rec = play_game(ev, cfg, rng, opponent_ev=opp)
         examples.extend(ex)
-        last = rec
+        if rec and opp is None:          # dashboard replay: prefer a pure self-play game
+            last = rec
+        elif last is None:
+            last = rec
     return examples, last
 
 
-def selfplay_parallel(net, cfg, n_games, base_seed, pool, n_workers):
+def selfplay_parallel(net, cfg, n_games, base_seed, pool, n_workers, opponent_pool=None):
     """Returns (all_examples, last_record). Examples are raw (planes, pi, z);
-    the caller applies symmetry augmentation."""
+    the caller applies symmetry augmentation. `opponent_pool` is a list of
+    (arch, state) mixed in as self-play opponents for a fraction of games."""
     arch, state = net.arch(), _cpu_state(net)
+    opp_pool = opponent_pool or []
     seeds = [base_seed + i for i in range(n_games)]
-    payloads = [(arch, state, cfg.to_dict(), c) for c in _split(seeds, n_workers)]
+    payloads = [(arch, state, cfg.to_dict(), c, opp_pool) for c in _split(seeds, n_workers)]
     examples, last = [], None
     for ex, rec in pool.map(_sp_chunk, payloads):
         examples.extend(ex)
@@ -86,8 +96,8 @@ def _match_chunk(payload):
     arch, a_state, opp, specs, board_size, max_plies, cfg_dict = payload
     cfg = Config(**cfg_dict)
     a_ev = Evaluator(_build_net(arch, a_state), _CPU)
-    if opp[0] == "az":
-        b_ev = Evaluator(_build_net(arch, opp[1]), _CPU)
+    if opp[0] == "az":                              # ("az", opp_arch, opp_state)
+        b_ev = Evaluator(_build_net(opp[1], opp[2]), _CPU)
 
     def make_a():
         return AZPlayer(a_ev, cfg)
@@ -123,13 +133,16 @@ def _match_chunk(payload):
     return out
 
 
-def match_parallel(a_net, opp, cfg, n_games, base_seed, pool, n_workers):
-    """Play `a_net` (as player A) vs an opponent over n_games with colors
-    alternating. `opp` is ("az", state) | ("random", None) | ("alphabeta", budget).
-    Returns (wins_a, wins_b, draws)."""
-    arch, a_state = a_net.arch(), _cpu_state(a_net)
+def net_arch_state(net):
+    return net.arch(), _cpu_state(net)
+
+
+def match_parallel(a_arch, a_state, opp, cfg, n_games, base_seed, pool, n_workers):
+    """Play side A (a_arch/a_state) vs an opponent over n_games, colors
+    alternating. `opp` is ("az", opp_arch, opp_state) | ("random", None) |
+    ("alphabeta", budget). Returns (wins_a, wins_b, draws)."""
     specs = [(g % 2 == 0, base_seed + g) for g in range(n_games)]
-    payloads = [(arch, a_state, opp, c, cfg.board_size, cfg.max_game_plies, cfg.to_dict())
+    payloads = [(a_arch, a_state, opp, c, cfg.board_size, cfg.max_game_plies, cfg.to_dict())
                 for c in _split(specs, n_workers)]
     wa = wb = dr = 0
     for res in pool.map(_match_chunk, payloads):

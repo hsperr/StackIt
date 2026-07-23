@@ -6,3 +6,4 @@ __pycache__
 # AlphaZero training artifacts
 checkpoints/
 alphazero/__pycache__
+references/
