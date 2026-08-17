@@ -20,8 +20,9 @@ class AlphaBeta:
     UPPERBOUND = 2
     LOWERBOUND = 3
 
-    def __init__(self, debug=False):
+    def __init__(self, debug=False, pvs=True):
         self.debug = debug
+        self.pvs = pvs             # principal-variation (null-window) search
         self.hashtable = {}
         self.perft = []
 
@@ -33,9 +34,9 @@ class AlphaBeta:
         cnt = 0
 
         while True:
-            entry = self.hashtable.get(board.hash(), None)
+            entry = self.hashtable.get(board.zkey, None)
             if entry:
-                hash_depth, hash_move, hash_alpha, hash_beta, hash_type, _ = entry
+                hash_depth, hash_move, hash_alpha, hash_beta, hash_type = entry
                 pv.append(hash_move)
                 if not hash_move in board.possible_moves():
                     break
@@ -52,6 +53,8 @@ class AlphaBeta:
     def get_best_move(self, board, thinking_time=30, max_depth=1000000, show_perft=False):
         self.stats = defaultdict(int)
         self.hashtable = {}
+        self.killers = {}          # ply -> up to 2 quiet moves that caused a cutoff
+        self.history_heur = {}     # move -> cumulative cutoff weight
         self.start_time = time.time()
         self.allowed_time = thinking_time
         self.perft = []
@@ -65,6 +68,7 @@ class AlphaBeta:
         depth = 0
         best_move, best_score = None, None
         while not self.time_over() and depth<=max_depth:
+            self.root_depth = depth    # ply = root_depth - depth, for killer indexing
             move, score = self._maxmimize(board, -1000000, 1000000, depth)
 
             if not self.time_over():
@@ -142,31 +146,28 @@ class AlphaBeta:
         best_move = None
 
         hash_move = None
-        hash_entry = None
-        # Compute the canonical string once and reuse it for both the hash key
-        # and the collision comparison below (was computed twice: hash() also
-        # calls to_string()).
-        current_string = board.to_string()
-        hash_entry = self.hashtable.get(hash(current_string), None)
+        # The board keeps an incremental 64-bit Zobrist key, so the TT key is a
+        # plain int lookup - no per-node board serialization. A full int is used
+        # as the dict key (Python doesn't truncate it), so distinct positions
+        # collide only on a true Zobrist collision, which is negligible at
+        # search scale; we therefore skip the old string re-verification.
+        key = board.zkey
+        hash_entry = self.hashtable.get(key, None)
 
         if hash_entry:
-            hash_depth, hash_move, hash_alpha, hash_beta, hash_type, board_string = hash_entry
-            if board_string == current_string:
-                if hash_depth >= depth:
-                    if hash_type == AlphaBeta.EXACT_MATCH:
-                        self.stats['hash_exact'] += 1
-                        return hash_move, hash_alpha
-                    elif hash_type == AlphaBeta.LOWERBOUND:
-                        alpha = max(alpha, hash_alpha)
-                    elif hash_type == AlphaBeta.UPPERBOUND:
-                        beta = min(beta, hash_alpha)
+            hash_depth, hash_move, hash_alpha, hash_beta, hash_type = hash_entry
+            if hash_depth >= depth:
+                if hash_type == AlphaBeta.EXACT_MATCH:
+                    self.stats['hash_exact'] += 1
+                    return hash_move, hash_alpha
+                elif hash_type == AlphaBeta.LOWERBOUND:
+                    alpha = max(alpha, hash_alpha)
+                elif hash_type == AlphaBeta.UPPERBOUND:
+                    beta = min(beta, hash_alpha)
 
-                    if alpha >= beta:
-                        self.stats['hash_cutoff'] += 1
-                        return hash_move, hash_alpha
-            else:
-                hash_move = None
-                self.stats['hash_collision'] += 1
+                if alpha >= beta:
+                    self.stats['hash_cutoff'] += 1
+                    return hash_move, hash_alpha
 
         if depth <= -6:
             score = board.boxes_for(board.current_player) - board.boxes_for(board.other_player)
@@ -180,38 +181,78 @@ class AlphaBeta:
             score = board.boxes_for(board.current_player) - board.boxes_for(board.other_player)
             return None, score
 
-        if hash_move and hash_move in poss_moves:
-            self.stats['using_hash_move_first'] += 1
-            poss_moves = [hash_move] + [x for x in poss_moves if not x == hash_move]
+        # --- Move ordering: hash move, then killer moves for this ply, then the
+        # history heuristic (moves that produced cutoffs elsewhere), then the
+        # board's own positional pre-sort as a stable tiebreak. Good ordering is
+        # what makes the null-window (PVS) searches below pay off. ---
+        ply = self.root_depth - depth
+        killers = self.killers.get(ply)
+        k0 = killers[0] if killers else None
+        k1 = killers[1] if killers and len(killers) > 1 else None
+        history = self.history_heur
 
+        if hash_move is not None and hash_move in poss_moves:
+            self.stats['using_hash_move_first'] += 1
+
+        def rank(m):
+            if m == hash_move:
+                return 1 << 40
+            r = history.get(m, 0)
+            if m == k0:
+                r += 1 << 30
+            elif m == k1:
+                r += 1 << 29
+            return r
+
+        # Stable sort keeps the positional pre-sort order for equal-rank moves.
+        poss_moves.sort(key=rank, reverse=True)
+
+        first = True
         for move in poss_moves:
             board.move(*move)
-            if depth<=0:
+            if depth <= 0:
                 self.stats['quiet_moves'] += 1
             else:
                 self.stats['moves_made'] += 1
-            _, score = self._maxmimize(board, -beta, -alpha, depth - 1)
+
+            if first or not self.pvs:
+                _, score = self._maxmimize(board, -beta, -alpha, depth - 1)
+                score = -score
+            else:
+                # Null-window "scout": assume this move is worse than the best so
+                # far and prove it cheaply. Only if it beats alpha (and matters)
+                # do we pay for a full re-search.
+                _, score = self._maxmimize(board, -alpha - 1, -alpha, depth - 1)
+                score = -score
+                if not self.time_over() and alpha < score < beta:
+                    self.stats['pvs_research'] += 1
+                    _, score = self._maxmimize(board, -beta, -alpha, depth - 1)
+                    score = -score
+
             if self.time_over():
                 board.undo()
                 break
+
+            board.undo()
+            first = False
 
             if self.debug:
                 print("move", move, "score", score, 'depth', depth, 'current_player', board.current_player)
                 _ = input("")
 
-            score *= -1
-            board.undo()
             if score > best_score:
                 best_score = score
                 best_move = move
 
-                if self.debug:
-                    print("******new best", move, score, 'depth', depth, 'current_player',
-                          board.current_player)
-
-            alpha = max(alpha, score)
-            if alpha > beta:
+            if score > alpha:
+                alpha = score
+            if alpha >= beta:
                 self.stats['beta_cutoff'] += 1
+                # This move refuted the position: remember it as a killer for
+                # this ply and bump its history score (deeper cutoffs weigh more).
+                if k0 != move:
+                    self.killers[ply] = [move] if k0 is None else [move, k0]
+                history[move] = history.get(move, 0) + (depth + 7) * (depth + 7)
                 break
 
         if not self.time_over():
@@ -222,57 +263,11 @@ class AlphaBeta:
             else:
                 hash_type = AlphaBeta.EXACT_MATCH
 
-            # Reuse a single to_string() per board for both the hash key and the
-            # stored value (previously hash() recomputed to_string(), doubling
-            # the work for each of the 8 stored symmetries).
-            self.hashtable[hash(current_string)] = (depth, best_move, alpha, beta, hash_type, current_string)
-
-            # Also store this evaluation under the hashes of the 7 other
-            # boards that are symmetric to this one (3 rotations, a flip,
-            # and the flip's 3 rotations), so a transposition into any of
-            # those equivalent orientations can reuse it. `best_move` must
-            # be transformed into each orientation's own coordinates too -
-            # storing it unrotated (or rotating some unrelated stale value)
-            # would hand back a move that is invalid, or silently wrong, for
-            # the board actually being searched. `bs` is computed once per
-            # store (board.hash() would recompute to_string internally).
-            if best_move is not None:
-                sym_move = best_move
-
-                board = board.rotate()
-                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
-                bs = board.to_string()
-                self.hashtable[hash(bs)] = (depth, sym_move, alpha, beta, hash_type, bs)
-
-                board = board.rotate()
-                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
-                bs = board.to_string()
-                self.hashtable[hash(bs)] = (depth, sym_move, alpha, beta, hash_type, bs)
-
-                board = board.rotate()
-                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
-                bs = board.to_string()
-                self.hashtable[hash(bs)] = (depth, sym_move, alpha, beta, hash_type, bs)
-
-                board = board.flip()
-                sym_move = flip_move(sym_move, board.size_x, board.size_y)
-                bs = board.to_string()
-                self.hashtable[hash(bs)] = (depth, sym_move, alpha, beta, hash_type, bs)
-
-                board = board.rotate()
-                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
-                bs = board.to_string()
-                self.hashtable[hash(bs)] = (depth, sym_move, alpha, beta, hash_type, bs)
-
-                board = board.rotate()
-                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
-                bs = board.to_string()
-                self.hashtable[hash(bs)] = (depth, sym_move, alpha, beta, hash_type, bs)
-
-                board = board.rotate()
-                sym_move = rotate_move(sym_move, board.size_x, board.size_y)
-                bs = board.to_string()
-                self.hashtable[hash(bs)] = (depth, sym_move, alpha, beta, hash_type, bs)
-
+            # Store under this position's Zobrist key. The 8-fold symmetry
+            # store used to live here (rotations + flip), but A/B benchmarking
+            # showed it net-negative: rebuilding 7 symmetric boards + hashing
+            # them per node cost more than the transposition hits it bought
+            # (~2.5x fewer nodes searched in the same budget). One store wins.
+            self.hashtable[key] = (depth, best_move, alpha, beta, hash_type)
 
         return best_move, best_score

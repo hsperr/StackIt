@@ -1,6 +1,7 @@
 from utils import StackItException
 import math
 import time
+import random
 
 
 class Board:
@@ -9,6 +10,51 @@ class Board:
     ENDC = '\033[0m'
 
     INITAL_BOX_INCREASE = 3
+
+    # --- Zobrist hashing -------------------------------------------------
+    # Incremental 64-bit hash of (cell values, owners, side-to-move). Kept up
+    # to date inside move()/undo() so the search never has to serialize the
+    # board to a string for its transposition-table key (that to_string() call
+    # used to dominate search time). Tables are built once per board size and
+    # shared across all boards of that size.
+    _ZOBRIST = {}          # (size_x, size_y) -> (piece_table, side_key)
+    _ZVMAX = 16            # max cell value covered (stable 0-4, transient <=8)
+
+    @classmethod
+    def _zobrist_tables(cls, size_x, size_y):
+        tables = cls._ZOBRIST.get((size_x, size_y))
+        if tables is None:
+            # Fixed seed -> reproducible keys across runs/processes (matters for
+            # the parallel self-play workers that share a TT-less protocol but
+            # still benefit from deterministic behaviour in tests).
+            rng = random.Random(0x57ACC17 ^ (size_x << 8) ^ size_y)
+            ncells = size_x * size_y
+            # piece[pos][owner][value]. Empty cells (owner 0, value 0) are
+            # forced to 0 so they contribute nothing to the key.
+            piece = [[[rng.getrandbits(64) for _ in range(cls._ZVMAX + 1)]
+                      for _ in range(3)] for _ in range(ncells)]
+            for pos in range(ncells):
+                piece[pos][0][0] = 0
+            tables = (piece, rng.getrandbits(64))
+            cls._ZOBRIST[(size_x, size_y)] = tables
+        return tables
+
+    def _init_zobrist(self):
+        """Bind this board to its size's Zobrist tables and compute the key
+        from scratch. Call once, after board/player/current_player are final."""
+        self._sx = len(self.board[0])
+        self._piece, self._side = Board._zobrist_tables(self._sx, len(self.board))
+        self.zkey = self._compute_zkey()
+
+    def _compute_zkey(self):
+        piece, z, pos = self._piece, 0, 0
+        for brow, prow in zip(self.board, self.player):
+            for v, p in zip(brow, prow):
+                z ^= piece[pos][p][v]
+                pos += 1
+        if self.current_player == 2:
+            z ^= self._side
+        return z
 
     @classmethod
     def from_string(cls, board_string):
@@ -36,6 +82,7 @@ class Board:
 
         instance.board = board
         instance.player = player
+        instance._init_zobrist()
         return instance
 
     def to_string(self):
@@ -47,7 +94,7 @@ class Board:
         return str(self.current_player) + ''.join(cells)
 
     def hash(self):
-        return hash(self.to_string())
+        return self.zkey
 
     def copy(self):
         return Board.from_custom_board(self.board, self.player, self.current_player)
@@ -60,6 +107,7 @@ class Board:
         instance.board = [row[:] for row in board]
         instance.player = [row[:] for row in player]
         instance.current_player = current_player
+        instance._init_zobrist()
         return instance
 
     def __init__(self, size_x=5, size_y=5):
@@ -69,6 +117,7 @@ class Board:
         self.current_player = 1
 
         self.history = []
+        self._init_zobrist()
 
     @property
     def size_x(self):
@@ -93,6 +142,7 @@ class Board:
         b.board = self.board[::-1]
         b.player = self.player[::-1]
         b.history = []
+        b._init_zobrist()
         return b
 
     def rotate(self):
@@ -101,6 +151,7 @@ class Board:
         b.board = [list(x) for x in zip(*self.board[::-1])]
         b.player = [list(x) for x in zip(*self.player[::-1])]
         b.history = []
+        b._init_zobrist()
         return b
 
     def possible_attack_moves(self):
@@ -159,23 +210,41 @@ class Board:
         return 1 if p1 else (2 if p2 else 0)
 
     def _throw_over(self, x, y):
-        self.board[y][x] -= 4
+        # Every cell mutation here also folds the change into self.zkey (XOR out
+        # the old (owner, value), XOR in the new). Bounds are inlined instead of
+        # calling _in_board so the cascade stays cheap.
+        b, p, piece, sx = self.board, self.player, self._piece, self._sx
+        cur = self.current_player
+        sy = len(b)
+        pos = y * sx + x
 
-        if self._in_board(x, y + 1):
-            self.board[y + 1][x] += 1
-            self.player[y + 1][x] = self.current_player
+        self.zkey ^= piece[pos][p[y][x]][b[y][x]]
+        b[y][x] -= 4
+        self.zkey ^= piece[pos][p[y][x]][b[y][x]]
 
-        if self._in_board(x, y - 1):
-            self.board[y - 1][x] += 1
-            self.player[y - 1][x] = self.current_player
+        if y + 1 < sy:
+            self.zkey ^= piece[pos + sx][p[y + 1][x]][b[y + 1][x]]
+            b[y + 1][x] += 1
+            p[y + 1][x] = cur
+            self.zkey ^= piece[pos + sx][cur][b[y + 1][x]]
 
-        if self._in_board(x + 1, y):
-            self.board[y][x + 1] += 1
-            self.player[y][x + 1] = self.current_player
+        if y - 1 >= 0:
+            self.zkey ^= piece[pos - sx][p[y - 1][x]][b[y - 1][x]]
+            b[y - 1][x] += 1
+            p[y - 1][x] = cur
+            self.zkey ^= piece[pos - sx][cur][b[y - 1][x]]
 
-        if self._in_board(x - 1, y):
-            self.board[y][x - 1] += 1
-            self.player[y][x - 1] = self.current_player
+        if x + 1 < sx:
+            self.zkey ^= piece[pos + 1][p[y][x + 1]][b[y][x + 1]]
+            b[y][x + 1] += 1
+            p[y][x + 1] = cur
+            self.zkey ^= piece[pos + 1][cur][b[y][x + 1]]
+
+        if x - 1 >= 0:
+            self.zkey ^= piece[pos - 1][p[y][x - 1]][b[y][x - 1]]
+            b[y][x - 1] += 1
+            p[y][x - 1] = cur
+            self.zkey ^= piece[pos - 1][cur][b[y][x - 1]]
 
     def _fields_to_throw(self):
         fields = []
@@ -188,10 +257,11 @@ class Board:
     def undo(self):
         if not self.history:
             raise StackItException("Cannot undo, no moves have been made")
-        current_player, board, player = self.history.pop()
+        current_player, board, player, zkey = self.history.pop()
         self.current_player = current_player
         self.board = board
         self.player = player
+        self.zkey = zkey
 
     def move(self, x, y, display=False):
         if self.player[y][x] and not self.player[y][x] == self.current_player:
@@ -203,15 +273,21 @@ class Board:
         self.history.append((
             self.current_player,
             [row[:] for row in self.board],
-            [row[:] for row in self.player]
+            [row[:] for row in self.player],
+            self.zkey
         ))
 
+        piece = self._piece
+        pos = y * self._sx + x
+        # XOR out the moved cell's old (owner, value) before mutating it.
+        self.zkey ^= piece[pos][self.player[y][x]][self.board[y][x]]
         if self.board[y][x] == 0:
             self.board[y][x] += Board.INITAL_BOX_INCREASE
         else:
             self.board[y][x] += 1
 
         self.player[y][x] = self.current_player
+        self.zkey ^= piece[pos][self.current_player][self.board[y][x]]
 
         if self.board[y][x] >= 5:
             self._throw_over(x, y)
@@ -227,6 +303,8 @@ class Board:
                         time.sleep(1)
                 fields = self._fields_to_throw()
 
+        # Flip side to move; toggling the side key XORs it in/out symmetrically.
+        self.zkey ^= self._side
         if self.current_player == 1:
             self.current_player = 2
         else:

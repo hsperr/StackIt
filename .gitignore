@@ -7,3 +7,15 @@ __pycache__
 checkpoints/
 alphazero/__pycache__
 references/
+archive/
+
+# Diagnostic / ablation training runs (checkpoints, logs, metrics)
+_diag_*/
+
+# Never commit model weights or run artifacts
+*.pt
+metrics.jsonl
+ratings.json
+status.json
+last_game.json
+*.jsonl.lock
