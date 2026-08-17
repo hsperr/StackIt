@@ -1,271 +1,575 @@
 /* ==========================================================================
-   StackIt — front-end engine
-   - vanilla fetch (no jQuery/Bootstrap)
-   - swaps board.html partial into #board
-   - client-side topple / chain-reaction animation by diffing board snapshots
+   StackIt — front end.
+
+   Talks to the JSON API in server.py. Renders the board from state, plays the
+   real cascade frames the server records (no guessing), and draws the engine's
+   analysis: principal variation, candidate moves, and for AlphaZero the raw
+   network policy as a heat overlay.
    ========================================================================== */
 (function () {
-    "use strict";
+"use strict";
 
-    var IID = window.STACKIT.iid;
-    var base = "/game/" + IID;
+var FRAME_MS = 110;          // pause between cascade frames
+var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    var boardEl = document.getElementById("board");
-    var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+var S = {                    // client state
+    iid: null,
+    state: null,
+    analysis: null,
+    net: null,
+    setup: { mode: "hva", ai: "alphabeta", seat: 1 },
+    engines: [],
+    busy: false,
+    heat: true
+};
 
-    var RING_STEP = 95;   // ms between cascade rings
-    var busy = false;     // true while a move / AI turn is in flight
+var $ = function (id) { return document.getElementById(id); };
+function plural(n, word) { return n + " " + word + (n === 1 ? "" : "s"); }
 
-    /* ------------------------------------------------------------- helpers -- */
+/* ------------------------------------------------------------------ api -- */
 
-    function grid()  { return document.getElementById("board-grid"); }
-    function cells() { return grid() ? grid().querySelectorAll(".cell") : []; }
-
-    // map id -> {value, owner} of the currently rendered board
-    function snapshot() {
-        var snap = {};
-        cells().forEach(function (c) {
-            snap[c.id] = {
-                value: parseInt(c.dataset.value, 10) || 0,
-                owner: c.dataset.owner
-            };
+function api(path, opts) {
+    opts = opts || {};
+    var init = { method: opts.method || "GET", headers: {} };
+    if (opts.body) {
+        init.headers["Content-Type"] = "application/json";
+        init.body = JSON.stringify(opts.body);
+    }
+    return fetch(path, init).then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+            if (!r.ok) throw new Error(j.error || ("Request failed (" + r.status + ")"));
+            return j;
         });
-        return snap;
-    }
+    });
+}
 
-    function applyState(cell, value, owner) {
-        cell.dataset.value = value;
-        cell.dataset.owner = owner;
-        cell.style.setProperty("--v", value);
-        var pip = cell.querySelector(".pip");
-        if (pip) pip.textContent = value ? value : "";
-    }
+var toastTimer = null;
+function toast(msg) {
+    var t = $("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.classList.remove("show"); }, 3800);
+}
 
-    function post(path, data) {
-        var body = new URLSearchParams(data || {});
-        return fetch(base + path, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: body.toString()
-        }).then(function (r) { return r.text(); });
-    }
+/* ---------------------------------------------------------------- setup -- */
 
-    /* --------------------------------------------------------- board swap -- */
+function paintSetup() {
+    document.querySelectorAll("#mode-choice .choice").forEach(function (b) {
+        b.classList.toggle("on", b.dataset.mode === S.setup.mode);
+    });
+    document.querySelectorAll("#seat-field .choice").forEach(function (b) {
+        b.classList.toggle("on", parseInt(b.dataset.seat, 10) === S.setup.seat);
+    });
+    document.querySelectorAll("#engine-choice .choice").forEach(function (b) {
+        b.classList.toggle("on", b.dataset.engine === S.setup.ai);
+    });
+    var vsAI = S.setup.mode === "hva";
+    $("opponent-field").hidden = !vsAI;
+    $("seat-field").hidden = !vsAI;
+    $("time-field").hidden = !vsAI;
+}
 
-    // Replace the board partial, then optionally play the topple animation
-    // that morphs `before` (the previous snapshot) into the freshly rendered
-    // final state, rippling outward from the move origin.
-    function swap(html, before) {
-        boardEl.innerHTML = html;
-        bindTiles();
-        updateScore();
-        maybeWin();
-        reflectBusy();
-        if (before) animateTopple(before);
-    }
-
-    function animateTopple(before) {
-        var g = grid();
-        if (!g) return;
-        var origin = g.dataset.lm;                 // "x-y" of the last move
-        if (reduceMotion || !origin) return;
-
-        var all = {};
-        cells().forEach(function (c) { all[c.id] = c; });
-
-        var oc = origin.split("-");
-        var ox = parseInt(oc[0], 10), oy = parseInt(oc[1], 10);
-
-        // Which tiles changed? Freeze the changed ones (except origin) back to
-        // their OLD look; they will flip to the new look on their ring's tick.
-        var waves = {};   // distance -> [cells]
-        Object.keys(all).forEach(function (id) {
-            var cell = all[id];
-            var prev = before[id];
-            if (!prev) return;
-            var changed = (parseInt(cell.dataset.value, 10) !== prev.value) ||
-                          (cell.dataset.owner !== prev.owner);
-            if (!changed || id === origin) return;
-
-            var p = id.split("-");
-            var d = Math.abs(parseInt(p[0], 10) - ox) + Math.abs(parseInt(p[1], 10) - oy);
-
-            // stash final look, render the old look for now
-            cell._final = { value: parseInt(cell.dataset.value, 10), owner: cell.dataset.owner };
-            applyState(cell, prev.value, prev.owner);
-            (waves[d] = waves[d] || []).push(cell);
+function renderEngines(list) {
+    S.engines = list;
+    var wrap = $("engine-choice");
+    wrap.innerHTML = "";
+    list.forEach(function (e) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "choice";
+        b.dataset.engine = e.id;
+        b.disabled = !e.available;
+        var sub = e.available ? e.blurb : e.reason;
+        b.innerHTML = '<span class="choice-title"></span><span class="choice-sub"></span>';
+        b.querySelector(".choice-title").textContent = e.name;
+        b.querySelector(".choice-sub").textContent = sub;
+        b.addEventListener("click", function () {
+            S.setup.ai = e.id;
+            paintSetup();
         });
+        wrap.appendChild(b);
+    });
+    // If the chosen engine is unavailable at this size, fall back to the first
+    // one that is, so "Start" never fails for a reason the user cannot see.
+    var chosen = list.filter(function (e) { return e.id === S.setup.ai; })[0];
+    if (!chosen || !chosen.available) {
+        var ok = list.filter(function (e) { return e.available; })[0];
+        if (ok) S.setup.ai = ok.id;
+    }
+    paintSetup();
+}
 
-        // origin pops first
-        var originCell = all[origin];
-        if (originCell) {
-            originCell.classList.add("pop");
-            originCell.addEventListener("animationend", function h() {
-                originCell.classList.remove("pop");
-                originCell.removeEventListener("animationend", h);
-            });
+function refreshEngines() {
+    var size = parseInt($("in-size").value, 10) || 5;
+    $("size-hint").textContent = size + " by " + size + " grid.";
+    return api("/api/engines?size=" + size)
+        .then(function (j) { renderEngines(j.engines); })
+        .catch(function (e) { toast(e.message); });
+}
+
+/* ---------------------------------------------------------------- board -- */
+
+function buildBoard(st) {
+    var g = $("board-grid");
+    g.style.setProperty("--cols", st.size_x);
+    g.innerHTML = "";
+    for (var y = 0; y < st.size_y; y++) {
+        for (var x = 0; x < st.size_x; x++) {
+            var c = document.createElement("div");
+            c.className = "cell";
+            c.id = "c-" + x + "-" + y;
+            c.dataset.x = x;
+            c.dataset.y = y;
+            c.innerHTML = '<span class="heat"></span><span class="pip"></span>';
+            c.addEventListener("click", onCellClick);
+            g.appendChild(c);
         }
+    }
+}
 
-        // outward ripple: each ring flips to its final look, staggered
-        Object.keys(waves).map(Number).sort(function (a, b) { return a - b; })
-            .forEach(function (d) {
+function cellAt(x, y) { return $("c-" + x + "-" + y); }
+
+function paintCells(cells, sizeX) {
+    cells.forEach(function (pair, i) {
+        var c = cellAt(i % sizeX, Math.floor(i / sizeX));
+        if (!c) return;
+        c.dataset.owner = pair[1];
+        c.dataset.value = pair[0];
+        c.querySelector(".pip").textContent = pair[0] ? pair[0] : "";
+    });
+}
+
+/** Play the server's recorded cascade, then settle on the final position. */
+function animate(frames, origin, sizeX) {
+    if (reduceMotion || !frames || frames.length < 2) return Promise.resolve();
+    var oc = origin ? cellAt(origin[0], origin[1]) : null;
+    if (oc) {
+        oc.classList.remove("pop");
+        void oc.offsetWidth;
+        oc.classList.add("pop");
+    }
+    // Every frame gets its own hold, the last one included — otherwise the
+    // final ring is overwritten by the settled position before it is visible.
+    return frames.reduce(function (chain, frame, i) {
+        return chain.then(function () {
+            return new Promise(function (res) {
                 setTimeout(function () {
-                    waves[d].forEach(function (cell) {
-                        if (cell._final) { applyState(cell, cell._final.value, cell._final.owner); cell._final = null; }
-                        cell.classList.remove("flip");
-                        void cell.offsetWidth;          // restart animation
-                        cell.classList.add("flip");
-                        cell.addEventListener("animationend", function h() {
-                            cell.classList.remove("flip");
-                            cell.removeEventListener("animationend", h);
-                        });
+                    var before = {};
+                    document.querySelectorAll(".cell").forEach(function (c) {
+                        before[c.id] = c.dataset.value + "/" + c.dataset.owner;
                     });
-                }, d * RING_STEP);
+                    paintCells(frame, sizeX);
+                    document.querySelectorAll(".cell").forEach(function (c) {
+                        if (before[c.id] !== c.dataset.value + "/" + c.dataset.owner) {
+                            c.classList.remove("flip");
+                            void c.offsetWidth;
+                            c.classList.add("flip");
+                        }
+                    });
+                    res();
+                }, FRAME_MS);
             });
-
-        g.classList.remove("settling"); void g.offsetWidth; g.classList.add("settling");
-    }
-
-    /* ---------------------------------------------------------- scoreboard - */
-
-    function updateScore() {
-        var counts = { p1: 0, p2: 0 };
-        cells().forEach(function (c) {
-            if (c.dataset.owner === "p1") counts.p1++;
-            else if (c.dataset.owner === "p2") counts.p2++;
         });
-        var t1 = document.getElementById("tally-p1");
-        var t2 = document.getElementById("tally-p2");
-        if (t1) t1.textContent = counts.p1;
-        if (t2) t2.textContent = counts.p2;
+    }, Promise.resolve());
+}
+
+function onCellClick() {
+    if (S.busy || !S.state) return;
+    var st = S.state;
+    if (st.over) return;
+    if (st.mode === "hva" && st.current_player === st.ai_seat) return;
+    var x = parseInt(this.dataset.x, 10), y = parseInt(this.dataset.y, 10);
+    var legal = st.legal.some(function (m) { return m[0] === x && m[1] === y; });
+    if (!legal) { toast("That cell belongs to the other player."); return; }
+
+    setBusy(true);
+    api("/api/game/" + S.iid + "/move", { method: "POST", body: { x: x, y: y } })
+        .then(function (j) {
+            return animate(j.frames, [x, y], j.state.size_x).then(function () {
+                applyState(j.state);
+                return maybeAIMove();
+            });
+        })
+        .catch(function (e) { toast(e.message); })
+        .then(function () { setBusy(false); });
+}
+
+function maybeAIMove() {
+    if (!S.state || !S.state.is_ai_turn) return Promise.resolve();
+    setThinking(true);
+    return api("/api/game/" + S.iid + "/ai", { method: "POST" })
+        .then(function (j) {
+            setThinking(false);
+            S.analysis = j.analysis;
+            renderAnalysis(j.analysis);
+            return animate(j.frames, j.move, j.state.size_x).then(function () {
+                applyState(j.state);
+                // The engine may move again if the human has no legal reply.
+                return maybeAIMove();
+            });
+        })
+        .catch(function (e) {
+            setThinking(false);
+            toast(e.message);
+        });
+}
+
+/* --------------------------------------------------------------- render -- */
+
+function applyState(st) {
+    var rebuild = !S.state || S.state.size_x !== st.size_x || S.state.size_y !== st.size_y;
+    S.state = st;
+    if (rebuild) buildBoard(st);
+    paintCells(st.cells, st.size_x);
+
+    // last-move marker
+    document.querySelectorAll(".cell.lastmove").forEach(function (c) {
+        c.classList.remove("lastmove");
+    });
+    if (st.last_move) {
+        var lm = cellAt(st.last_move[0], st.last_move[1]);
+        if (lm) lm.classList.add("lastmove");
     }
 
-    function maybeWin() {
-        var g = grid();
-        var banner = document.getElementById("banner");
-        if (!g || !banner) return;
-        var w = g.dataset.win;   // "0" | "1" | "2"
-        if (w === "1" || w === "2") {
-            var who = w === "1" ? "p1" : "p2";
-            banner.className = "banner show " + who;
-            banner.querySelector(".msg").textContent =
-                (w === "1" ? "You win!" : "The AI wins!") + " Every cell captured.";
+    // which cells the human may click right now
+    var humansTurn = !st.over && (st.mode === "hvh" || st.current_player !== st.ai_seat);
+    var legal = {};
+    st.legal.forEach(function (m) { legal[m[0] + "-" + m[1]] = true; });
+    document.querySelectorAll(".cell").forEach(function (c) {
+        var ok = humansTurn && legal[c.dataset.x + "-" + c.dataset.y];
+        c.classList.toggle("playable", !!ok);
+    });
+
+    // scoreboard
+    [1, 2].forEach(function (p) {
+        var cells = st.cell_count[String(p)], blocks = st.blocks[String(p)];
+        $("name-" + p).textContent = st.labels[String(p)];
+        $("sub-" + p).textContent = plural(cells, "cell") + " · " + plural(blocks, "block");
+        $("pcard-" + p).classList.toggle("active", !st.over && st.current_player === p);
+    });
+
+    // turn line
+    var turn = $("turn-text");
+    if (st.over) {
+        turn.textContent = "Game over.";
+    } else if (st.mode === "hvh") {
+        turn.textContent = st.labels[String(st.current_player)] + " to move.";
+    } else if (st.current_player === st.ai_seat) {
+        turn.textContent = st.ai_name + " is choosing a move…";
+    } else {
+        turn.textContent = "Your turn. Click a grey cell or one of your own.";
+    }
+    // S.busy still wins: a repaint mid-turn must not re-enable the buttons.
+    $("btn-undo").disabled = S.busy || !st.can_undo || st.over;
+
+    // win overlay
+    var ov = $("win-overlay");
+    if (st.over) {
+        var msg;
+        if (!st.winner) {
+            msg = "It is a draw.";
+        } else if (st.mode === "hvh") {
+            msg = st.labels[String(st.winner)] + " wins!";
         } else {
-            banner.className = "banner";
+            msg = st.winner === st.human_seat ? "You win!" : st.ai_name + " wins.";
         }
+        $("win-msg").textContent = msg;
+        ov.classList.add("show");
+    } else {
+        ov.classList.remove("show");
     }
 
-    /* ----------------------------------------------------- turn / busy UI -- */
+    $("analysis").hidden = st.mode !== "hva";
+    refreshNetRead();
+}
 
-    function humansTurn() {
-        var g = grid();
-        return g && g.dataset.current === "p1";
+function setBusy(on) {
+    S.busy = on;
+    var g = $("board-grid");
+    if (g) g.classList.toggle("busy", on);
+    ["btn-undo", "btn-new"].forEach(function (id) { $(id).disabled = on; });
+    if (!on && S.state) $("btn-undo").disabled = !S.state.can_undo || S.state.over;
+}
+
+function setThinking(on) {
+    if (!S.state) return;
+    $("pcard-" + S.state.ai_seat).classList.toggle("thinking", on);
+    if (on) {
+        $("eval-cap").textContent = "thinking…";
+        $("an-when").textContent = "";
     }
+}
 
-    function setBusy(on) {
-        busy = on;
-        reflectBusy();
+/* ------------------------------------------------------------- analysis -- */
+
+function mvText(m) { return "col " + m[0] + ", row " + m[1]; }
+function mvShort(m) { return m[0] + "," + m[1]; }
+
+function peek(m, on) {
+    var c = cellAt(m[0], m[1]);
+    if (c) c.classList.toggle("peek", on);
+}
+
+function renderAnalysis(a) {
+    S.analysis = a;
+    if (!a) return;
+
+    $("an-engine").textContent = a.name;
+    $("an-when").textContent = a.elapsed + "s of thinking";
+
+    // headline evaluation
+    $("eval-num").textContent = a.headline.text;
+    $("eval-cap").textContent = a.headline.caption;
+    var fill = $("eval-fill"), pct;
+    if (a.headline.kind === "score") {
+        // material score: map roughly -20..+20 onto the bar
+        var v = Math.max(-20, Math.min(20, a.headline.value || 0));
+        pct = (v + 20) / 40 * 100;
+    } else {
+        pct = (a.headline.value || 0) * 100;
     }
+    fill.style.width = pct + "%";
+    fill.style.background = S.state && S.state.ai_seat === 2 ? "var(--p2)" : "var(--p1)";
 
-    // Apply the current `busy` state to whatever board DOM is present now
-    // (re-applied after every swap, since the board partial is replaced).
-    function reflectBusy() {
-        var g = grid();
-        if (g) g.classList.toggle("busy", busy);
-        ["btn-new", "btn-set", "btn-undo"].forEach(function (id) {
-            var b = document.getElementById(id);
-            if (b) b.disabled = busy;
-        });
-        var status = document.getElementById("status");
-        if (status) status.classList.toggle("busy", busy);
-        var p2 = document.getElementById("pcard-p2");
-        if (p2) p2.classList.toggle("thinking", busy);
+    // stat chips
+    var chips = [];
+    if (a.depth !== null && a.depth !== undefined) {
+        chips.push(["looked ahead", a.depth + " moves"]);
     }
-
-    /* --------------------------------------------------------- interaction - */
-
-    function bindTiles() {
-        var human = humansTurn();
-        cells().forEach(function (c) {
-            var mine = c.dataset.owner === "p1" || c.dataset.owner === "empty";
-            if (human && mine) {
-                c.classList.add("playable");
-                c.classList.remove("locked");
-                c.addEventListener("click", onTileClick);
-            } else {
-                c.classList.add("locked");
-            }
-        });
+    if (a.engine === "alphazero") {
+        chips.push(["positions imagined", a.nodes]);
+    } else if (a.nodes) {
+        chips.push(["positions checked", a.nodes.toLocaleString()]);
     }
+    $("an-stats").innerHTML = chips.map(function (c) {
+        return '<span class="stat">' + c[0] + ' <b>' + c[1] + '</b></span>';
+    }).join("");
 
-    function onTileClick(e) {
-        if (busy || !humansTurn()) return;
-        var before = snapshot();
-        setBusy(true);
-        post("/move", { move: this.id })
-            .then(function (html) {
-                swap(html, before);
-                return queryAI();
-            })
-            .catch(function () { setBusy(false); });
+    renderPV(a);
+    renderCandidates(a);
+    renderLadder(a);
+}
+
+function renderPV(a) {
+    var wrap = $("pv-list");
+    $("pv-block").hidden = false;
+    wrap.innerHTML = "";
+    if (!a.pv || !a.pv.length) {
+        wrap.innerHTML = '<span class="pv-empty">It did not look far enough ahead to say.</span>';
+        return;
     }
+    var seat = S.state ? S.state.ai_seat : 2;
+    a.pv.forEach(function (m, i) {
+        var who = ((i % 2) === 0) ? seat : (seat === 1 ? 2 : 1);
+        var el = document.createElement("span");
+        el.className = "pv-step";
+        el.dataset.seat = who;
+        el.innerHTML = '<span class="n"></span><span class="t"></span>';
+        el.querySelector(".n").textContent = i + 1;
+        el.querySelector(".t").textContent = mvShort(m);
+        el.title = (i === 0 ? "it plays " : (who === seat ? "it plays " : "it expects you to play "))
+                 + mvText(m);
+        el.addEventListener("mouseenter", function () { peek(m, true); });
+        el.addEventListener("mouseleave", function () { peek(m, false); });
+        wrap.appendChild(el);
+    });
+}
 
-    function queryAI() {
-        if (grid().dataset.win !== "0") { setBusy(false); return Promise.resolve(); }
-        var before = snapshot();
-        var status = document.getElementById("status-text");
-        var secs = parseInt(grid().dataset.thinking, 10) || 0;
-        var left = secs, timer = null;
-        if (status) {
-            status.textContent = "AI is thinking… " + left + "s";
-            timer = setInterval(function () {
-                left = Math.max(0, left - 1);
-                status.textContent = "AI is thinking… " + left + "s";
-            }, 1000);
+function renderCandidates(a) {
+    var block = $("cand-block"), wrap = $("cand-list");
+    if (!a.candidates || !a.candidates.length) { block.hidden = true; return; }
+    block.hidden = false;
+    $("cand-hint").textContent = a.engine === "alphazero"
+        ? "How often the search chose each move, and how good it looked."
+        : "The moves it tried, best first.";
+    var maxW = a.candidates.reduce(function (m, c) { return Math.max(m, c.weight || 0); }, 0) || 1;
+    wrap.innerHTML = "";
+    a.candidates.forEach(function (c, i) {
+        var row = document.createElement("div");
+        row.className = "cand" + (i === 0 ? " best" : "");
+        row.innerHTML = '<span class="fill"></span><span class="mv"></span>' +
+                        '<span class="val"></span><span class="wt"></span>';
+        row.querySelector(".fill").style.width = ((c.weight || 0) / maxW * 100) + "%";
+        row.querySelector(".mv").textContent = mvShort(c.move);
+        row.querySelector(".val").textContent = c.value_text;
+        row.querySelector(".wt").textContent = c.weight
+            ? (a.engine === "alphazero" ? c.weight + " visits" : c.weight + " games")
+            : "";
+        row.title = mvText(c.move);
+        row.addEventListener("mouseenter", function () { peek(c.move, true); });
+        row.addEventListener("mouseleave", function () { peek(c.move, false); });
+        wrap.appendChild(row);
+    });
+}
+
+/** Ask the net what it makes of the position currently on screen. This is a
+ *  single forward pass with no search, and it always describes the board the
+ *  user is looking at — unlike the search analysis, which is one move stale. */
+function refreshNetRead() {
+    var block = $("net-block");
+    if (!S.state || S.state.ai !== "alphazero" || S.state.mode !== "hva" || S.state.over) {
+        S.net = null; block.hidden = true; applyHeat(); return Promise.resolve();
+    }
+    return api("/api/game/" + S.iid + "/netread")
+        .then(function (j) {
+            S.net = j.net;
+            if (!j.net) { block.hidden = true; applyHeat(); return; }
+            block.hidden = false;
+            var st = S.state;
+            var mine = j.net.for_player === st.human_seat;
+            $("net-hint").textContent = mine
+                ? "This is where the net would play if it sat in your seat. Brighter means keener."
+                : "This is where the net wants to play next. Brighter means keener.";
+            $("net-label").textContent = mine
+                ? "Your chance to win, in its eyes"
+                : "Its chance to win";
+            $("net-wp").textContent = j.net.win_prob_text;
+            applyHeat();
+        })
+        .catch(function () { S.net = null; block.hidden = true; applyHeat(); });
+}
+
+function applyHeat() {
+    var net = S.net;
+    document.querySelectorAll(".cell").forEach(function (c) {
+        c.style.removeProperty("--heat");
+        var n = c.querySelector(".heat-num");
+        if (n) n.remove();
+    });
+    if (!S.heat || !net || !net.policy || !net.policy.length) return;
+    var max = net.policy.reduce(function (m, p) { return Math.max(m, p[2]); }, 0) || 1;
+    net.policy.forEach(function (p) {
+        var c = cellAt(p[0], p[1]);
+        if (!c) return;
+        var rel = p[2] / max;
+        if (rel < 0.06) return;
+        c.style.setProperty("--heat", (0.15 + rel * 0.85).toFixed(2));
+        if (rel > 0.18) {
+            var n = document.createElement("span");
+            n.className = "heat-num";
+            n.textContent = Math.round(p[2] * 100) + "%";
+            c.appendChild(n);
         }
-        return fetch(base + "/move", { method: "GET" })
-            .then(function (r) { return r.text(); })
-            .then(function (html) {
-                if (timer) clearInterval(timer);
-                if (status) status.textContent = "";
-                swap(html, before);
-                setBusy(false);
-            })
-            .catch(function () {
-                if (timer) clearInterval(timer);
-                if (status) status.textContent = "";
-                setBusy(false);
+    });
+}
+
+function renderLadder(a) {
+    var block = $("ladder-block"), body = $("ladder-body");
+    if (!a.ladder || !a.ladder.length) { block.hidden = true; return; }
+    block.hidden = false;
+    body.innerHTML = "";
+    a.ladder.slice().reverse().forEach(function (r) {
+        var tr = document.createElement("tr");
+        tr.innerHTML = '<td class="d"></td><td class="s"></td><td class="l"></td>';
+        tr.children[0].textContent = r.depth + " deep";
+        tr.children[1].textContent = (r.score > 0 ? "+" : "") + r.score;
+        tr.children[2].textContent = (r.pv || []).map(mvShort).join(" → ");
+        body.appendChild(tr);
+    });
+}
+
+/* ------------------------------------------------------------- controls -- */
+
+function startGame() {
+    var body = {
+        size: parseInt($("in-size").value, 10) || 5,
+        mode: S.setup.mode,
+        ai: S.setup.ai,
+        human_seat: S.setup.seat,
+        thinking_time: parseInt($("in-time").value, 10) || 3
+    };
+    $("setup-error").textContent = "";
+    $("btn-start").disabled = true;
+    api("/api/game", { method: "POST", body: body })
+        .then(function (j) {
+            S.iid = j.state.iid;
+            S.analysis = null;
+            $("setup").hidden = true;
+            $("game").hidden = false;
+            ["pv-block", "cand-block", "net-block", "ladder-block"].forEach(function (id) {
+                $(id).hidden = true;
             });
-    }
+            $("eval-num").textContent = "—";
+            $("eval-cap").textContent = "no moves yet";
+            $("eval-fill").style.width = "0";
+            $("an-stats").innerHTML = "";
+            $("an-engine").textContent = j.state.ai_name;
+            $("an-when").textContent = "";
+            applyState(j.state);
+            setBusy(true);
+            return maybeAIMove().then(function () { setBusy(false); });
+        })
+        .catch(function (e) { $("setup-error").textContent = e.message; })
+        .then(function () { $("btn-start").disabled = false; });
+}
 
-    /* ------------------------------------------------------- menu buttons -- */
+function showSetup() {
+    $("game").hidden = true;
+    $("setup").hidden = false;
+    refreshEngines();
+}
 
-    document.getElementById("btn-new").addEventListener("click", function () {
-        var size = document.getElementById("size").value;
+function bind() {
+    document.querySelectorAll("#mode-choice .choice").forEach(function (b) {
+        b.addEventListener("click", function () { S.setup.mode = b.dataset.mode; paintSetup(); });
+    });
+    document.querySelectorAll("#seat-field .choice").forEach(function (b) {
+        b.addEventListener("click", function () {
+            S.setup.seat = parseInt(b.dataset.seat, 10);
+            paintSetup();
+        });
+    });
+    document.querySelectorAll(".step").forEach(function (b) {
+        b.addEventListener("click", function () {
+            var input = $(b.dataset.target);
+            var v = (parseInt(input.value, 10) || 0) + parseInt(b.dataset.step, 10);
+            var lo = parseInt(input.min, 10), hi = parseInt(input.max, 10);
+            input.value = Math.max(lo, Math.min(hi, v));
+            input.dispatchEvent(new Event("change"));
+        });
+    });
+    $("in-size").addEventListener("change", refreshEngines);
+    $("btn-start").addEventListener("click", startGame);
+    $("btn-new").addEventListener("click", showSetup);
+    $("btn-again").addEventListener("click", showSetup);
+
+    $("btn-undo").addEventListener("click", function () {
+        if (S.busy || !S.iid) return;
         setBusy(true);
-        post("/new", { x: size, y: size }).then(function (html) {
-            swap(html, null); setBusy(false);
-        }).catch(function () { setBusy(false); });
+        api("/api/game/" + S.iid + "/undo", { method: "POST" })
+            .then(function (j) {
+                S.analysis = null;
+                ["pv-block", "cand-block", "net-block", "ladder-block"].forEach(function (id) {
+                    $(id).hidden = true;
+                });
+                $("eval-num").textContent = "—";
+                $("eval-cap").textContent = "taken back";
+                $("eval-fill").style.width = "0";
+                $("an-stats").innerHTML = "";
+                applyState(j.state);
+            })
+            .catch(function (e) { toast(e.message); })
+            .then(function () { setBusy(false); });
     });
 
-    document.getElementById("btn-set").addEventListener("click", function () {
-        setBusy(true);
-        post("/set", {
-            thinking_time: document.getElementById("thinking_time").value,
-            max_depth: document.getElementById("max_depth").value,
-            ai: document.getElementById("ais").value
-        }).then(function (html) { swap(html, null); setBusy(false); })
-          .catch(function () { setBusy(false); });
+    $("net-heat").addEventListener("change", function () {
+        S.heat = this.checked;
+        applyHeat();
     });
 
-    document.getElementById("btn-undo").addEventListener("click", function () {
-        setBusy(true);
-        post("/undo", {}).then(function (html) { swap(html, null); setBusy(false); })
-                         .catch(function () { setBusy(false); });
+    $("btn-rules").addEventListener("click", function () { $("rules").hidden = false; });
+    $("btn-rules-close").addEventListener("click", function () { $("rules").hidden = true; });
+    $("rules").addEventListener("click", function (e) {
+        if (e.target === this) this.hidden = true;
     });
+    document.addEventListener("keydown", function (e) {
+        if (e.key === "Escape") $("rules").hidden = true;
+    });
+}
 
-    /* ------------------------------------------------------------- init ---- */
-    bindTiles();
-    updateScore();
-    maybeWin();
+bind();
+paintSetup();
+refreshEngines();
+
 })();

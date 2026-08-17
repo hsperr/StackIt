@@ -263,7 +263,14 @@ class Board:
         self.player = player
         self.zkey = zkey
 
-    def move(self, x, y, display=False):
+    def move(self, x, y, display=False, on_step=None):
+        """Play (x, y) for the current player, resolving the whole chain reaction.
+
+        `on_step`, if given, is called once after the placement and once after
+        every cascade ring, so a caller can record the intermediate positions
+        (the UI animates the real toppling instead of guessing it). It costs one
+        branch per ring on the search path when unused.
+        """
         if self.player[y][x] and not self.player[y][x] == self.current_player:
             raise StackItException(f"Cannot move ontop of other player (current_player={self.current_player}, x={x}, y={y}, field={self.player[y][x]})")
 
@@ -289,11 +296,16 @@ class Board:
         self.player[y][x] = self.current_player
         self.zkey ^= piece[pos][self.current_player][self.board[y][x]]
 
+        if on_step:
+            on_step(self)
+
         if self.board[y][x] >= 5:
             self._throw_over(x, y)
             if display:
                 self.print()
                 time.sleep(1)
+            if on_step:
+                on_step(self)
             fields = self._fields_to_throw()
             while fields:
                 for field in fields:
@@ -301,6 +313,8 @@ class Board:
                     if display:
                         self.print()
                         time.sleep(1)
+                if on_step:
+                    on_step(self)
                 fields = self._fields_to_throw()
 
         # Flip side to move; toggling the side key XORs it in/out symmetrically.

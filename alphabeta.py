@@ -58,6 +58,10 @@ class AlphaBeta:
         self.start_time = time.time()
         self.allowed_time = thinking_time
         self.perft = []
+        # Same iterative-deepening rows as `perft`, but as data rather than
+        # pre-formatted strings, so the web UI can render the depth ladder and
+        # the principal variation without parsing display text.
+        self.iter_log = []
 
         poss_moves = board.possible_moves()
         if len(poss_moves) == 0:
@@ -72,6 +76,14 @@ class AlphaBeta:
             move, score = self._maxmimize(board, -1000000, 1000000, depth)
 
             if not self.time_over():
+                self.iter_log.append({
+                    "depth": depth,
+                    "move": list(move) if move else None,
+                    "score": score,
+                    "elapsed": round(time.time() - self.start_time, 2),
+                    "nodes": self.stats.get('moves_made', 0),
+                    "pv": [list(m) for m in self.get_pv(board)[:8]],
+                })
                 self.perft.append([f"{depth} ",
                           f"{move} ",
                           f"{score} ",

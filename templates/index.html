@@ -1,73 +1,195 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>StackIt</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="{{ url_for('static', filename='stackit.css') }}">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StackIt</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%232d7dff'/><rect x='6' y='6' width='20' height='20' rx='6' fill='%2362a0ff'/></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='stackit.css') }}">
 </head>
 <body>
 
 <header class="topbar">
-    <span class="logo-mark"></span>
-    <h1 class="logo"><span class="stack">Stack</span><span class="it">It</span></h1>
-    <p class="tagline">Stack blocks, trigger chain reactions, and topple the board into your colour. First to own every cell wins.</p>
+  <span class="logo-mark"></span>
+  <h1 class="logo"><span class="stack">Stack</span><span class="it">It</span></h1>
+  <button class="btn ghost small" id="btn-rules" type="button">How to play</button>
 </header>
 
-<main class="wrap">
-    <aside class="card panel" id="controls">
-        <h2>Game setup</h2>
+<!-- ============================ SETUP SCREEN ============================ -->
+<div class="setup-screen" id="setup">
+  <div class="setup-card card">
+    <h2>New game</h2>
 
-        <div class="field">
-            <label for="size">Board size</label>
-            <div class="row">
-                <input class="grow" type="text" id="size" value="{{ game.board.size_x }}" inputmode="numeric">
-                <button class="btn primary" id="btn-new" type="button">New</button>
-            </div>
-            <p class="hint">Square grid, N&times;N. Starts a fresh game.</p>
+    <div class="field">
+      <span class="label">Who is playing?</span>
+      <div class="choice-grid" id="mode-choice">
+        <button class="choice" data-mode="hva" type="button">
+          <span class="choice-title">You vs computer</span>
+          <span class="choice-sub">Play against an engine and watch it think</span>
+        </button>
+        <button class="choice" data-mode="hvh" type="button">
+          <span class="choice-title">Two players</span>
+          <span class="choice-sub">Share one screen, take turns</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="field" id="opponent-field">
+      <span class="label">Choose your opponent</span>
+      <div class="choice-list" id="engine-choice"></div>
+    </div>
+
+    <div class="field" id="seat-field">
+      <span class="label">Who moves first?</span>
+      <div class="choice-grid">
+        <button class="choice compact" data-seat="1" type="button">
+          <span class="swatch p1"></span><span class="choice-title">You</span>
+        </button>
+        <button class="choice compact" data-seat="2" type="button">
+          <span class="swatch p2"></span><span class="choice-title">Computer</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label class="label" for="in-size">Board size</label>
+        <div class="stepper">
+          <button class="step" data-step="-1" data-target="in-size" type="button">&minus;</button>
+          <input id="in-size" type="number" value="5" min="2" max="12" inputmode="numeric">
+          <button class="step" data-step="1" data-target="in-size" type="button">+</button>
         </div>
-
-        <hr class="divider">
-
-        <div class="field">
-            <label for="ais">AI opponent</label>
-            <select id="ais">
-                <option value="alpha" {{ game.is_alpha() }}>AlphaBeta</option>
-                <option value="mcts" {{ game.is_mcts() }}>Monte Carlo Tree Search</option>
-                <option value="az" {{ game.is_az() }}>AlphaZero (trained net)</option>
-            </select>
+        <p class="hint" id="size-hint"></p>
+      </div>
+      <div class="field" id="time-field">
+        <label class="label" for="in-time">Thinking time</label>
+        <div class="stepper">
+          <button class="step" data-step="-1" data-target="in-time" type="button">&minus;</button>
+          <input id="in-time" type="number" value="3" min="1" max="60" inputmode="numeric">
+          <button class="step" data-step="1" data-target="in-time" type="button">+</button>
         </div>
+        <p class="hint">Seconds per computer move. More time, stronger play.</p>
+      </div>
+    </div>
 
-        <div class="field">
-            <label for="thinking_time">AI thinking time (seconds)</label>
-            <input type="text" id="thinking_time" value="{{ game.thinking_time }}" inputmode="numeric">
+    <p class="setup-error" id="setup-error"></p>
+    <button class="btn primary big" id="btn-start" type="button">Start game</button>
+  </div>
+</div>
+
+<!-- ============================= GAME SCREEN ============================ -->
+<main class="game-screen" id="game" hidden>
+
+  <div class="board-column">
+    <div class="scoreboard">
+      <div class="pcard" id="pcard-1" data-p="1">
+        <span class="dot"></span>
+        <span class="meta">
+          <span class="name" id="name-1">Player 1</span>
+          <span class="sub" id="sub-1"></span>
+        </span>
+        <span class="thinking-badge">thinking<span class="dots"><i></i><i></i><i></i></span></span>
+      </div>
+      <div class="vs">vs</div>
+      <div class="pcard" id="pcard-2" data-p="2">
+        <span class="dot"></span>
+        <span class="meta">
+          <span class="name" id="name-2">Player 2</span>
+          <span class="sub" id="sub-2"></span>
+        </span>
+        <span class="thinking-badge">thinking<span class="dots"><i></i><i></i><i></i></span></span>
+      </div>
+    </div>
+
+    <div class="board-stage card">
+      <div id="board-grid"></div>
+      <div class="win-overlay" id="win-overlay">
+        <div class="win-card">
+          <span class="win-emoji">&#127881;</span>
+          <p class="win-msg" id="win-msg"></p>
+          <button class="btn primary" id="btn-again" type="button">Play again</button>
         </div>
+      </div>
+    </div>
 
-        <div class="field">
-            <label for="max_depth">AI max search depth</label>
-            <div class="row">
-                <input class="grow" type="text" id="max_depth" value="{{ game.max_depth }}" inputmode="numeric">
-                <button class="btn" id="btn-set" type="button">Apply</button>
-            </div>
-        </div>
+    <div class="turnbar" id="turnbar">
+      <span class="turn-text" id="turn-text"></span>
+      <span class="spacer"></span>
+      <button class="btn ghost small" id="btn-undo" type="button">&#8630; Undo</button>
+      <button class="btn ghost small" id="btn-new" type="button">New game</button>
+    </div>
+  </div>
 
-        <hr class="divider">
+  <!-- ---------------------------- ANALYSIS ---------------------------- -->
+  <aside class="analysis" id="analysis" hidden>
+    <div class="card an-head">
+      <div class="an-title">
+        <span class="an-engine" id="an-engine">AlphaBeta</span>
+        <span class="an-when" id="an-when"></span>
+      </div>
+      <div class="an-eval">
+        <div class="eval-num" id="eval-num">—</div>
+        <div class="eval-cap" id="eval-cap">thinking…</div>
+      </div>
+      <div class="eval-bar"><span id="eval-fill"></span></div>
+      <div class="an-stats" id="an-stats"></div>
+    </div>
 
-        <button class="btn ghost" id="btn-undo" type="button">&#8630; Undo last move</button>
-    </aside>
+    <div class="card an-block" id="pv-block">
+      <h3>What it expects to happen</h3>
+      <p class="block-hint">The moves it thinks both sides will play. Point at one to see the cell.</p>
+      <div class="pv-list" id="pv-list"></div>
+    </div>
 
-    <section id="board">
-        {% include 'board.html' %}
-    </section>
+    <div class="card an-block" id="cand-block">
+      <h3>Moves it considered</h3>
+      <p class="block-hint" id="cand-hint"></p>
+      <div class="cand-list" id="cand-list"></div>
+    </div>
+
+    <div class="card an-block" id="net-block">
+      <h3>What the network sees right now</h3>
+      <p class="block-hint" id="net-hint"></p>
+      <div class="net-row">
+        <span class="net-label" id="net-label">Chance to win</span>
+        <span class="net-val" id="net-wp">—</span>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="net-heat" checked>
+        <span>Show it on the board</span>
+      </label>
+    </div>
+
+    <div class="card an-block" id="ladder-block">
+      <h3>How deep it looked</h3>
+      <p class="block-hint">Each row is one round of searching, one move deeper than the last.</p>
+      <div class="table-scroll">
+        <table class="ladder"><tbody id="ladder-body"></tbody></table>
+      </div>
+    </div>
+  </aside>
 </main>
 
-<script>
-    window.STACKIT = { iid: "{{ game.iid }}" };
-</script>
-<script src="{{ url_for('static', filename='stackit.js') }}"></script>
+<!-- ============================== RULES ================================ -->
+<div class="modal" id="rules" hidden>
+  <div class="modal-card card">
+    <h2>How to play</h2>
+    <ol class="rules">
+      <li>Click any empty cell, or one of your own, to drop blocks on it.</li>
+      <li>An empty cell starts at <b>3</b>. One of your own cells goes up by <b>1</b>.</li>
+      <li>When a cell reaches <b>5</b> it topples: it loses 4 blocks and pushes one block into each neighbour.</li>
+      <li>Every cell it topples into becomes <b>yours</b>. Toppling can set off a chain reaction.</li>
+      <li>Own every cell on the board and you win.</li>
+    </ol>
+    <button class="btn primary" id="btn-rules-close" type="button">Got it</button>
+  </div>
+</div>
 
+<div class="toast" id="toast"></div>
+
+<script src="{{ url_for('static', filename='stackit.js') }}"></script>
 </body>
 </html>

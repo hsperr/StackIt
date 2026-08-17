@@ -11,6 +11,35 @@ The rough outline of the tutorials could be:
 
 I am fairly sure that this will be a *long* way and we will probably rework the board implementation a few times over.
 
+## Running it
+
+```bash
+python3 server.py                  # play in a browser: http://localhost:9999
+python3 arena.py --help            # pit the engines against each other
+python3 bench_search.py --size 5 --time 3   # measure AlphaBeta search depth
+```
+
+The web UI offers two players on one screen, or you against an engine. Against
+an engine it also shows what that engine is thinking: the line it expects
+(principal variation), the moves it weighed, and — for AlphaZero — the trained
+network's own read of the position as a heat map over the board.
+
+AlphaZero only appears as an opponent once a network exists for that board size
+(`checkpoints/best.pt`). See [alphazero/README.md](alphazero/README.md) for
+training.
+
+## Where the code lives
+
+| file | role |
+|---|---|
+| `board.py` | the game itself: moves, chain reactions, Zobrist hashing |
+| `alphabeta.py` | alpha-beta search engine (PVS, killers, transposition table) |
+| `mcts.py` | plain Monte-Carlo tree search engine |
+| `alphazero/` | self-play trainer + neural-network engine |
+| `server.py` | JSON API + web UI |
+| `arena.py` | engine-vs-engine tournaments |
+| `bench_search.py` | search-depth benchmark |
+
 ## The Game
 
 The idea for the game of StackIt is fairly simple.
