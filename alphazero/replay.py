@@ -1,4 +1,4 @@
-"""A bounded replay buffer of (state, pi, z) examples.
+"""A bounded replay buffer of (state, pi, z, ownership) examples.
 
 Old samples are evicted so the net keeps training on data from recent (stronger)
 policies. Sampling is uniform over whatever is currently in the buffer.
@@ -25,6 +25,8 @@ class ReplayBuffer:
         planes = np.stack([self.buf[i][0] for i in idx])
         pis = np.stack([self.buf[i][1] for i in idx])
         zs = np.array([self.buf[i][2] for i in idx], dtype=np.float32)
+        owns = np.stack([self.buf[i][3] for i in idx]).astype(np.int64)
         return (torch.from_numpy(planes).to(device),
                 torch.from_numpy(pis).to(device),
-                torch.from_numpy(zs).to(device))
+                torch.from_numpy(zs).to(device),
+                torch.from_numpy(owns).to(device))

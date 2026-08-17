@@ -1,10 +1,22 @@
 """Generate self-play games with MCTS and turn them into training examples.
 
-Each visited position stores (encoded_state, pi, player), where pi is the
-MCTS visit-count distribution at temperature 1 (the "improved policy" target).
-When the game ends, z (the outcome from that position's player's view) is
-filled in. Moves are sampled with temperature 1 for the first `temp_moves`
-plies (exploration/data diversity), then greedily.
+Each recorded position stores (encoded_state, pi, player), where pi is the
+Gumbel completed-policy improvement target. When the game ends, z (the outcome
+from that position's player's view) and a per-cell ownership target (which player
+owns each cell at game end, from that position's player's view) are filled in.
+
+Two efficiency devices from KataGo / Gumbel AlphaZero are used here:
+
+* Playout Cap Randomization: only a fraction (`pcr_prob`) of the main net's
+  moves get a full search and are recorded; the rest get a cheap `pcr_fast_sims`
+  search and are played but NOT recorded. More games/hour, cleaner targets.
+* Tree reuse: in pure self-play the chosen child's subtree is carried into the
+  next ply, so its search starts from work already done.
+
+Each ply plays the Gumbel search's *selected action* (the Sequential-Halving
+survivor), while recording the completed policy as the training target. Root
+Gumbel noise is the exploration device: on for the first `temp_moves` plies (so
+the selected action varies), off afterwards (greedy).
 """
 import numpy as np
 
@@ -22,6 +34,19 @@ def game_winner(board):
     return 1 if b1 > b2 else 2 if b2 > b1 else 0
 
 
+def _ownership(final_board, mover, n):
+    """Flat len-N*N int array of each cell's final owner from `mover`'s view:
+    0 empty, 1 mine, 2 theirs. Indexed y*N+x to match action indices."""
+    own = np.zeros(n * n, dtype=np.int64)
+    grid = final_board.player
+    for y in range(n):
+        row = grid[y]
+        for x in range(n):
+            o = row[x]
+            own[y * n + x] = 0 if o == 0 else (1 if o == mover else 2)
+    return own
+
+
 def play_game(evaluator, cfg, rng, opponent_ev=None):
     """Play one self-play game and return (examples, record).
 
@@ -37,10 +62,12 @@ def play_game(evaluator, cfg, rng, opponent_ev=None):
     mcts = MCTS(evaluator, cfg)
     mcts_opp = MCTS(opponent_ev, cfg) if opponent_ev is not None else mcts
     main_color = 1 if opponent_ev is None else (1 if rng.random() < 0.5 else 2)
+    pure_selfplay = opponent_ev is None
 
     board = Board(n, n)
-    positions = []            # (planes, pi, player) — main net's positions only
+    positions = []            # (planes, pi, player) — main net's recorded positions
     moves = []
+    reuse = None              # promoted subtree for tree reuse (pure self-play only)
 
     for ply in range(cfg.max_game_plies):
         if terminal_value(board) is not None:
@@ -52,22 +79,49 @@ def play_game(evaluator, cfg, rng, opponent_ev=None):
             x, y = legal[rng.integers(len(legal))]
             moves.append((x, y))
             board.move(x, y)
+            reuse = None                              # tree is stale after a random move
             continue
 
         is_main = opponent_ev is None or mover == main_color
-        counts, _ = (mcts if is_main else mcts_opp).search(board, add_noise=True)
-        total = counts.sum()
-        if total == 0:
+        # Playout Cap Randomization: record a full search on a fraction of the
+        # main net's moves; play the rest cheaply and unrecorded.
+        record = is_main and (rng.random() < cfg.pcr_prob)
+        if is_main:
+            budget = cfg.num_simulations if record else cfg.pcr_fast_sims
+        else:
+            budget = cfg.num_simulations
+        r = reuse if (pure_selfplay and cfg.tree_reuse) else None
+        # Gumbel noise IS the exploration device: on it for the first temp_moves
+        # plies (varied selected action), off after (greedy). It replaces the old
+        # tau=1 completed-policy sampling.
+        explore = ply < cfg.temp_moves
+        pi, root = (mcts if is_main else mcts_opp).search(
+            board, add_noise=explore, max_sims=budget, reuse_root=r)
+        if pi.sum() == 0:
             break
-        pi = counts / total
 
-        if is_main:                                   # record only the main net
+        if record:                                    # record only full-search main moves
             positions.append((encode(board), pi.astype(np.float32), mover))
 
-        if ply < cfg.temp_moves:                      # tau=1: sample by visits
-            action = int(rng.choice(len(counts), p=pi))
-        else:                                         # tau->0: greedy
-            action = int(np.argmax(counts))
+        # Play the Sequential-Halving survivor, NOT an argmax of the completed
+        # policy — the latter can pick an action that Gumbel search eliminated.
+        # (The completed policy `pi` is still the recorded training target.)
+        action = root.selected_action
+        # ABLATION (self_play_gumbel=False): tau=1 visit-count sampling for the
+        # first temp_moves plies — the pre-Gumbel exploration device.
+        if not getattr(cfg, "self_play_gumbel", True) and explore:
+            counts = root.child_N
+            tot = counts.sum()
+            if tot > 0:
+                li = int(rng.choice(len(root.legal), p=counts / tot))
+                action = int(root.legal[li])
+
+        if pure_selfplay and cfg.tree_reuse:          # carry the chosen child forward
+            li = np.where(root.legal == action)[0]
+            reuse = root.children.get(int(li[0])) if len(li) else None
+        else:
+            reuse = None
+
         x, y = index_to_move(action, n)
         moves.append((x, y))
         board.move(x, y)
@@ -76,19 +130,20 @@ def play_game(evaluator, cfg, rng, opponent_ev=None):
     examples = []
     for planes, pi, player in positions:
         z = 0.0 if winner == 0 else (1.0 if player == winner else -1.0)
-        examples.append((planes, pi, z))
+        own = _ownership(board, player, n)
+        examples.append((planes, pi, z, own))
 
     record = {"moves": moves, "size": n, "winner": winner, "plies": len(moves)}
     return examples, record
 
 
 def expand_symmetries(examples, cfg):
-    """Apply dihedral augmentation to a list of (planes, pi, z)."""
+    """Apply dihedral augmentation to a list of (planes, pi, z, own)."""
     if not cfg.augment_symmetries:
         return list(examples)
     out = []
     n = cfg.board_size
-    for planes, pi, z in examples:
-        for p2, pi2 in augment(planes, pi, n, n):
-            out.append((p2, pi2.astype(np.float32), z))
+    for planes, pi, z, own in examples:
+        for p2, pi2, own2 in augment(planes, pi, own, n, n):
+            out.append((p2, pi2.astype(np.float32), z, own2))
     return out

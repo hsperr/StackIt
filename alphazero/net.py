@@ -1,4 +1,5 @@
-"""The two-headed residual network: policy head + value head over a shared body.
+"""Residual network with three heads over a shared body: policy, value, and a
+per-cell ownership head (final owner of each cell).
 
 Small by design (a few residual blocks, 64 filters) so self-play — which calls
 this once per MCTS simulation — stays fast on CPU/MPS. BatchNorm is used for
@@ -61,6 +62,11 @@ class StackNet(nn.Module):
         self.v_fc1 = nn.Linear(n_actions, channels)
         self.v_fc2 = nn.Linear(channels, 1)
 
+        # ownership head: per-cell 3-way logits (empty / mine / theirs at game end)
+        self.o_conv1 = nn.Conv2d(channels, 32, 3, padding=1, bias=False)
+        self.o_bn = nn.BatchNorm2d(32)
+        self.o_conv2 = nn.Conv2d(32, 3, 1)
+
     def forward(self, x):
         h = self.tower(self.stem(x))
 
@@ -70,7 +76,10 @@ class StackNet(nn.Module):
         v = F.relu(self.v_bn(self.v_conv(h)))
         v = F.relu(self.v_fc1(v.flatten(1)))
         v = torch.tanh(self.v_fc2(v)).squeeze(-1)         # value in [-1, 1]
-        return p, v
+
+        o = F.relu(self.o_bn(self.o_conv1(h)))
+        o = self.o_conv2(o)                               # [B, 3, N, N] ownership logits
+        return p, v, o
 
     # ---- convenience config for checkpointing ----
     def arch(self):
@@ -92,7 +101,7 @@ class Evaluator:
         self.net.eval()
         planes = encode(board)
         x = torch.from_numpy(planes).unsqueeze(0).to(self.device)
-        logits, value = self.net(x)
+        logits, value, _ = self.net(x)                    # ownership head unused at inference
         logits = logits[0].float().cpu().numpy()
         v = float(value[0].item())
 
@@ -110,7 +119,7 @@ class Evaluator:
         """Batched version for many leaf boards at once (used by parallel eval)."""
         self.net.eval()
         x = torch.from_numpy(np.stack([encode(b) for b in boards])).to(self.device)
-        logits, values = self.net(x)
+        logits, values, _ = self.net(x)                   # ownership head unused at inference
         logits = logits.float().cpu().numpy()
         values = values.float().cpu().numpy()
         out = []

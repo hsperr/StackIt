@@ -43,10 +43,29 @@ def test_augment_keeps_state_policy_aligned():
     planes = encode(b)
     pi = np.zeros(16, dtype=np.float32)
     pi[action_index(2, 1, 4)] = 1.0
-    for p2, pi2 in augment(planes, pi, 4, 4):
+    own = np.zeros(16, dtype=np.int64)
+    own[action_index(1, 1, 4)] = 1                 # p1's cell owned by the mover
+    for p2, pi2, own2 in augment(planes, pi, own, 4, 4):
         assert p2.shape == (NUM_PLANES, 4, 4)
         assert np.all(p2.sum(axis=0) == 1)
         assert pytest.approx(pi2.sum(), abs=1e-6) == 1.0
+        assert own2.shape == (16,)
+        assert own2.sum() == 1                      # the single owned cell is preserved
+
+
+def test_augment_symmetric_state_keeps_distinct_labels():
+    # An empty board is symmetric under all 8 dihedral ops, but a one-hot policy
+    # is not — each orientation is a distinct training target and must be kept.
+    # (Keying dedup on the state alone would collapse these to one example.)
+    b = Board(3, 3)
+    planes = encode(b)
+    pi = np.zeros(9, dtype=np.float32)
+    pi[action_index(0, 0, 3)] = 1.0          # a corner cell
+    own = np.zeros(9, dtype=np.int64)
+    out = list(augment(planes, pi, own, 3, 3))
+    assert len(out) > 1                       # not collapsed onto a single orientation
+    keys = {pi2.tobytes() for _, pi2, _ in out}
+    assert len(keys) == len(out)              # every emitted target is distinct
 
 
 def test_terminal_value_domination():
@@ -66,17 +85,32 @@ def test_evaluator_masks_illegal_and_normalizes():
     assert -1.0 <= v <= 1.0
 
 
-def test_mcts_visit_counts_sum_to_sims_and_are_legal():
-    cfg = Config(num_simulations=30, channels=16, res_blocks=2)
+def test_mcts_policy_is_normalized_legal_and_selects_a_legal_action():
+    cfg = Config(num_simulations=32, channels=16, res_blocks=2)
     net = StackNet(4, cfg.channels, cfg.res_blocks)
     mcts = MCTS(Evaluator(net, "cpu"), cfg)
     b = Board(4, 4)
-    counts, root = mcts.search(b, add_noise=True)
-    assert counts.sum() == cfg.num_simulations
+    pi, root = mcts.search(b, add_noise=True)
+    # Gumbel completed policy: a probability distribution over legal actions
+    assert pytest.approx(pi.sum(), abs=1e-6) == 1.0
     legal = set(root.legal.tolist())
-    for i, c in enumerate(counts):
-        if c > 0:
+    for i, p in enumerate(pi):
+        if p > 0:
             assert i in legal
+    # the action to PLAY is a legal action, and is exposed separately from pi
+    assert root.selected_action in legal
+
+
+def test_mcts_sequential_halving_spends_exact_budget():
+    # Sequential Halving must consume EXACTLY num_simulations root visits — no
+    # more (over-budget), no fewer (under-budget). Try several budgets, incl.
+    # non-power-of-two, that don't divide the schedule evenly.
+    for sims in (16, 25, 30, 32, 40, 100, 128):
+        cfg = Config(num_simulations=sims, channels=16, res_blocks=2)
+        net = StackNet(4, cfg.channels, cfg.res_blocks)
+        mcts = MCTS(Evaluator(net, "cpu"), cfg)
+        _, root = mcts.search(Board(4, 4), add_noise=True)
+        assert int(root.child_N.sum()) == sims, f"budget {sims}"
 
 
 def test_game_winner_by_boxes():

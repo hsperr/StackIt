@@ -14,28 +14,33 @@ from .encoding import index_to_move
 
 
 class AZPlayer:
-    """MCTS+net player. Samples the first `explore_plies` moves proportional to
-    visit counts (for game variety in eval), then plays greedily. No Dirichlet
-    noise — that's a self-play-only exploration device."""
+    """MCTS+net player. Always plays the search's `selected_action` (never an
+    argmax/sample of the policy, which could pick a Gumbel-eliminated action).
+    Early game variety comes from search noise on the first `explore_plies` plies
+    (Gumbel at the root for fixed-sim search, Dirichlet for the wall-clock path),
+    which perturbs the selected action without ever playing an eliminated one."""
 
     def __init__(self, evaluator, cfg, explore_plies=4):
         self.mcts = MCTS(evaluator, cfg)
         self.explore_plies = explore_plies
         self._ply = 0
+        # >0 => search by wall-clock (s/move) instead of a fixed sim count
+        self.time_budget = getattr(cfg, "az_time_budget", 0.0) or None
 
     def reset(self):
         self._ply = 0
 
     def move(self, board, rng):
-        counts, _ = self.mcts.search(board, add_noise=False)
+        explore = self._ply < self.explore_plies         # noise -> early variety
+        if self.time_budget:
+            counts, root = self.mcts.search(board, add_noise=explore, rng=rng,
+                                            time_budget=self.time_budget, max_sims=1_000_000)
+        else:
+            counts, root = self.mcts.search(board, add_noise=explore, rng=rng)
         if counts.sum() == 0:
             return None
-        if self._ply < self.explore_plies:
-            a = int(rng.choice(len(counts), p=counts / counts.sum()))
-        else:
-            a = int(np.argmax(counts))
         self._ply += 1
-        return index_to_move(a, board.size_x)
+        return index_to_move(root.selected_action, board.size_x)
 
 
 class RandomPlayer:

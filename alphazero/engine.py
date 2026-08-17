@@ -67,8 +67,11 @@ class AlphaZero:
             counts, root = self.mcts.search(board, add_noise=False, max_sims=self.sims)
 
         nx = board.size_x
-        best_local = int(np.argmax(root.child_N))
-        best_action = int(root.legal[best_local])
+        # Play the action the search selected (Sequential-Halving survivor for the
+        # Gumbel path, most-visited child for PUCT) — NOT a raw child_N argmax, whose
+        # ties among final Gumbel candidates would pick arbitrarily.
+        best_action = root.selected_action
+        best_local = int(np.where(root.legal == best_action)[0][0])
         move = index_to_move(best_action, nx)
         n = root.child_N[best_local]
         score = float(root.child_W[best_local] / n) if n > 0 else None

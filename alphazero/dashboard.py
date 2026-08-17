@@ -6,7 +6,8 @@ win-rate curves (hoverable), live counters, an accepted-candidate history table,
 and an animated replay of the latest self-play game. Runs independently of
 training — start the trainer in one terminal and this in another.
 
-    python3 -m alphazero.dashboard          # http://localhost:8123
+    python3 -m alphazero.dashboard                      # reads checkpoints/
+    python3 -m alphazero.dashboard --ckpt-dir RUN_DIR   # reads another run
 """
 import os
 import json
@@ -21,11 +22,20 @@ from .config import Config
 
 app = Flask(__name__)
 CKPT = Config().ckpt_dir
+METRICS_FILE = Config().metrics_file
 
 # ---- interactive "play the best model" state (single local user) ----
 _play_lock = threading.Lock()
 PLAY = {"game": None}
 BEST_PT = os.path.join(CKPT, "best.pt")
+
+
+def _set_ckpt_dir(path):
+    """Point the dashboard at another run directory (see --ckpt-dir)."""
+    global CKPT, BEST_PT, METRICS_FILE
+    CKPT = path
+    BEST_PT = os.path.join(CKPT, "best.pt")
+    METRICS_FILE = os.path.join(CKPT, "metrics.jsonl")
 
 
 def _board_state(board):
@@ -110,7 +120,7 @@ def _read_json(name, default):
 
 @app.route("/api/metrics")
 def api_metrics():
-    path = Config().metrics_file
+    path = METRICS_FILE
     rows = []
     if os.path.exists(path):
         with open(path) as f:
@@ -132,6 +142,23 @@ def api_status():
 @app.route("/api/ratings")
 def api_ratings():
     return jsonify(_read_json("ratings.json", {"versions": [], "champion": None}))
+
+
+@app.route("/api/ab_bench")
+def api_ab_bench():
+    """Strong-AlphaBeta benchmark results (one row per champion that played)."""
+    path = Config().ab_bench_file
+    rows = []
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        rows.append(json.loads(line))
+                    except ValueError:
+                        pass
+    return jsonify(rows)
 
 
 @app.route("/api/game")
@@ -265,19 +292,19 @@ tr.rej td:first-child{box-shadow:inset 3px 0 0 var(--slot-line)}
   <div class="stat"><span class="v" id="s-buf">–</span><span class="k">buffer</span></div>
   <div class="stat"><span class="v" id="s-elo">–</span><span class="k">best elo</span></div>
   <div class="stat"><span class="v" id="s-rand">–</span><span class="k">win vs random</span></div>
-  <div class="stat"><span class="v" id="s-ab">–</span><span class="k">win vs alphabeta</span></div>
+  <div class="stat"><span class="v" id="s-ab">–</span><span class="k">win vs AlphaBeta (5s)</span></div>
   <div class="stat"><span class="v" id="s-extra">–</span><span class="k" id="s-extra-k">phase</span></div>
 </div>
 <div class="wrap">
   <div style="display:flex;flex-direction:column;gap:18px">
     <div class="card">
-      <h2>Elo rating <span style="text-transform:none;font-weight:500;color:#c2cbe0">· AlphaBeta = 0</span></h2>
+      <h2>Elo rating <span style="text-transform:none;font-weight:500;color:#c2cbe0">· random = 0</span></h2>
       <div class="chart" id="w-elo"><canvas id="c-elo" width="640" height="230"></canvas>
         <div class="vline"></div><div class="tip"></div></div>
       <div class="legend">
         <span><i class="dot" style="background:var(--good)"></i>current model</span>
         <span><i class="dot" style="background:var(--p1)"></i>champion (best)</span>
-        <span><i class="dot" style="background:var(--p2)"></i>reference bars (dashed)</span>
+        <span><i class="dot" style="background:var(--p2)"></i>reference / AlphaBeta bars (dashed)</span>
       </div>
     </div>
     <div class="card">
@@ -341,7 +368,7 @@ const fmtPct=v=>v==null||isNaN(v)?'–':Math.round(v*100)+'%';
 function fmtDur(s){s=Math.floor(s);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;
   return h?`${h}h ${String(m).padStart(2,'0')}m`:`${m}m ${String(ss).padStart(2,'0')}s`;}
 
-let ROWS=[], RATINGS={versions:[]}, RATED={};
+let ROWS=[], RATINGS={versions:[]}, RATED={}, AB_BENCH=[];
 const CHARTS={};   // canvasId -> {x0,x1,xmax}
 
 // ---------- charts ----------
@@ -377,8 +404,9 @@ function draw(canvas, series, ymin, ymax, xmax, accepted, hlines){
     const pts=s.pts.filter(p=>p.y!=null&&!isNaN(p.y));if(!pts.length)continue;
     ctx.setLineDash([]);ctx.strokeStyle=s.color;ctx.lineWidth=2.5;ctx.beginPath();
     pts.forEach((p,i)=>{const a=X(p.x),b=Y(p.y);i?ctx.lineTo(a,b):ctx.moveTo(a,b);});
-    ctx.stroke();ctx.lineWidth=1;
-    const last=pts[pts.length-1];ctx.fillStyle=s.color;ctx.beginPath();ctx.arc(X(last.x),Y(last.y),3.5,0,7);ctx.fill();
+    ctx.stroke();ctx.lineWidth=1;ctx.fillStyle=s.color;
+    const dotPts=s.dots?pts:[pts[pts.length-1]];      // mark every point for sparse series
+    for(const p of dotPts){ctx.beginPath();ctx.arc(X(p.x),Y(p.y),3.5,0,7);ctx.fill();}
   }
 }
 
@@ -406,12 +434,22 @@ async function refreshMetrics(){
   let rows;try{rows=await(await fetch('/api/metrics')).json();}catch(e){return;}
   ROWS=rows;
   try{RATINGS=await(await fetch('/api/ratings')).json();}catch(e){}
+  try{AB_BENCH=await(await fetch('/api/ab_bench')).json();}catch(e){}
   const byId={};(RATINGS.versions||[]).forEach(v=>{byId[v.id]=v;});RATED=byId;
   const xmax=Math.max(1,rows.length?rows[rows.length-1].iter:1);
   const accepted=rows.filter(r=>r.accepted).map(r=>r.iter);
-  // elo chart (AlphaBeta = 0): current model + champion, with reference bars to beat
-  const eloCur=rows.map(r=>({x:r.iter,y:r.elo}));
-  const eloBest=rows.map(r=>({x:r.iter,y:r.best_elo}));
+  // Elo must come from the CURRENT global fit (RATED), never from r.elo/r.best_elo.
+  // Those columns are snapshots of *different* Bradley-Terry fits: the one at iter k
+  // saw only versions <= k, so its scale differs from the one at iter k+50. Plotting
+  // the stored column shows refit noise (+-80 Elo) and hides the real trend; the
+  // single current fit over the whole result book is the only comparable series.
+  let champ=0;
+  rows.forEach(r=>{if(r.accepted)champ=r.iter;
+    const c=RATED['v'+r.iter],b=RATED['v'+champ];
+    r._elo=c&&c.elo!=null?c.elo:r.elo;
+    r._best_elo=b&&b.elo!=null?b.elo:r.best_elo;});
+  const eloCur=rows.map(r=>({x:r.iter,y:r._elo}));
+  const eloBest=rows.map(r=>({x:r.iter,y:r._best_elo}));
   const refs=(RATINGS.versions||[]).filter(v=>v.ref);
   const hlines=refs.map(v=>({y:v.elo,label:v.id.replace('ref:',''),color:'rgba(224,109,0,.7)'}));
   const evals=eloCur.concat(eloBest).map(p=>p.y).filter(v=>v!=null&&!isNaN(v))
@@ -426,23 +464,24 @@ async function refreshMetrics(){
   const lmax=Math.max(0.6,...clean);
   draw($('c-loss'),[{color:css('--p1'),pts:pol},{color:css('--p2'),pts:val}],0,lmax,xmax);
   const rnd=rows.map(r=>({x:r.iter,y:r.winrate_vs_random}));
-  const ab=rows.map(r=>({x:r.iter,y:r.winrate_vs_alphabeta}));
+  // strong-AlphaBeta (5s) benchmark: one point per champion that played, at its iter
+  const ab=(AB_BENCH||[]).map(r=>({x:r.champion_iter,y:r.winrate}));
   const ref=rows.map(r=>({x:r.iter,y:r.winrate_vs_reference}));
   const gate=rows.map(r=>({x:r.iter,y:r.cand_winrate_vs_best}));
   const refName=(rows.find(r=>r.reference_id)||{}).reference_id;
   if(refName)$('leg-ref').textContent='vs '+refName;
   const half=[{x:1,y:0.5},{x:xmax,y:0.5}];
   draw($('c-win'),[{color:'#dfe4ef',pts:half},{color:css('--good'),pts:rnd},
-     {color:css('--p2'),pts:ab},{color:'#8b5cf6',pts:ref},{color:css('--p1'),pts:gate}],0,1,xmax,accepted);
+     {color:css('--p2'),pts:ab,dots:true},{color:'#8b5cf6',pts:ref},{color:css('--p1'),pts:gate}],0,1,xmax,accepted);
   // counters
   const done=rows.length;
   const sumSec=rows.reduce((a,r)=>a+(r.iter_sec||0),0);
   if(done!==_rowCount){_rowCount=done;_elapsedBase=sumSec;_baseAt=performance.now();}
   $('s-speed').textContent=done?(sumSec/done).toFixed(0)+'s':'–';
   if(done){const last=rows[done-1];
-    $('s-elo').textContent=last.best_elo!=null?Math.round(last.best_elo):'–';
+    $('s-elo').textContent=last._best_elo!=null?Math.round(last._best_elo):'–';
     $('s-rand').textContent=fmtPct(last.winrate_vs_random);
-    $('s-ab').textContent=fmtPct(last.winrate_vs_alphabeta);}
+    $('s-ab').textContent=(AB_BENCH&&AB_BENCH.length)?fmtPct(AB_BENCH[AB_BENCH.length-1].winrate):'–';}
   renderTable(rows);
 }
 
@@ -457,8 +496,9 @@ function renderTable(rows){
     const elo=live.elo!=null?Math.round(live.elo):(r.elo==null?'–':Math.round(r.elo));
     const gm=live.games!=null?live.games:'';
     const vs=r.version==null?'?':('v'+r.version);      // previous best it was gated against
+    const abm=(AB_BENCH||[]).find(a=>a.champion_iter===r.iter);   // strong-AB result, if this champ played
     html+=`<tr class="${cls}"><td>#${r.iter}</td><td>${elo}</td><td>${gm}</td><td>${vs}</td><td>${gatev}</td>`+
-          `<td>${fmtPct(r.winrate_vs_random)}</td><td>${fmtPct(r.winrate_vs_alphabeta)}</td></tr>`;
+          `<td>${fmtPct(r.winrate_vs_random)}</td><td>${abm?fmtPct(abm.winrate):'–'}</td></tr>`;
   }
   $('logbody').innerHTML=html;
 }
@@ -582,15 +622,15 @@ function showStats(s){
 }
 
 hookHover('w-elo','c-elo',()=>[
-  {label:'current model',color:css('--good'),get:r=>(RATED['v'+r.iter]||{}).elo??r.elo,fmt:v=>v.toFixed(0)},
-  {label:'champion',color:css('--p1'),get:r=>r.best_elo,fmt:v=>v.toFixed(0)},
+  {label:'current model',color:css('--good'),get:r=>r._elo,fmt:v=>v.toFixed(0)},
+  {label:'champion',color:css('--p1'),get:r=>r._best_elo,fmt:v=>v.toFixed(0)},
   {label:'games',color:'#9aa3bd',get:r=>(RATED['v'+r.iter]||{}).games,fmt:v=>String(v)}]);
 hookHover('w-loss','c-loss',()=>[
   {label:'policy',color:css('--p1'),get:r=>r.policy_loss,fmt:v=>v.toFixed(3)},
   {label:'value',color:css('--p2'),get:r=>r.value_loss,fmt:v=>v.toFixed(3)}]);
 hookHover('w-win','c-win',()=>[
   {label:'vs random',color:css('--good'),get:r=>r.winrate_vs_random,fmt:fmtPct},
-  {label:'vs AlphaBeta',color:css('--p2'),get:r=>r.winrate_vs_alphabeta,fmt:fmtPct},
+  {label:'vs AlphaBeta (5s)',color:css('--p2'),get:r=>{const m=(AB_BENCH||[]).find(a=>a.champion_iter===r.iter);return m?m.winrate:null;},fmt:fmtPct},
   {label:'vs reference',color:'#8b5cf6',get:r=>r.winrate_vs_reference,fmt:fmtPct},
   {label:'gate',color:css('--p1'),get:r=>r.cand_winrate_vs_best,fmt:fmtPct}]);
 
@@ -608,7 +648,11 @@ def main():
     ap = argparse.ArgumentParser(description="StackIt AlphaZero training dashboard")
     ap.add_argument("--port", type=int, default=8123)
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--ckpt-dir", default=None, dest="ckpt_dir",
+                    help="run directory to read (default: checkpoints/)")
     args = ap.parse_args()
+    if args.ckpt_dir:
+        _set_ckpt_dir(args.ckpt_dir)
     print(f"Dashboard: http://{args.host}:{args.port}  (reading {CKPT}/)")
     app.run(host=args.host, port=args.port, debug=False)
 

@@ -82,18 +82,26 @@ def _apply_grid(grid, k, flip):
     return np.ascontiguousarray(out)
 
 
-def augment(planes, pi, size_x, size_y):
-    """Given encoded `planes` [9,N,N] and policy target `pi` (flat len N*N),
-    yield (planes', pi') for every board symmetry. The SAME dihedral op is
-    applied to both so the (state, policy) pairing stays consistent."""
+def augment(planes, pi, own, size_x, size_y):
+    """Given encoded `planes` [9,N,N], policy target `pi` (flat len N*N) and the
+    per-cell ownership target `own` (flat len N*N), yield (planes', pi', own')
+    for every board symmetry. The SAME dihedral op is applied to all three so the
+    (state, policy, ownership) triple stays spatially consistent."""
     square = size_x == size_y
     pi_grid = np.asarray(pi, dtype=np.float32).reshape(size_y, size_x)
+    own_grid = np.asarray(own).reshape(size_y, size_x)
     seen = set()
     for k, flip in _dihedral_ops(square):
         p = _apply_planes(planes, k, flip)
         g = _apply_grid(pi_grid, k, flip)
-        key = p.tobytes()
-        if key in seen:            # skip duplicate orientations (symmetric states)
+        o = _apply_grid(own_grid, k, flip)
+        # Dedup on the FULL (state, policy, ownership) triple, not the state alone:
+        # a symmetric state with an asymmetric policy/ownership label produces
+        # distinct targets per orientation, and all of them are wanted (dropping
+        # them biases the target toward one orientation). Only truly identical
+        # triples are skipped.
+        key = (p.tobytes(), g.tobytes(), o.tobytes())
+        if key in seen:
             continue
         seen.add(key)
-        yield p, g.reshape(-1)
+        yield p, g.reshape(-1), o.reshape(-1)
