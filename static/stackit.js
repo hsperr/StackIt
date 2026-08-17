@@ -104,8 +104,28 @@ function refreshEngines() {
     var size = parseInt($("in-size").value, 10) || 5;
     $("size-hint").textContent = size + " by " + size + " grid.";
     return api("/api/engines?size=" + size)
-        .then(function (j) { renderEngines(j.engines); })
+        .then(function (j) {
+            applyLimits(j.limits);
+            renderEngines(j.engines);
+        })
         .catch(function (e) { toast(e.message); });
+}
+
+/** The server caps board size and thinking time; mirror those caps in the form
+ *  so nobody picks a number that is silently clamped on submit. */
+function applyLimits(lim) {
+    if (!lim) return;
+    var size = $("in-size"), time = $("in-time");
+    size.max = lim.max_board;
+    time.max = lim.max_thinking_time;
+    if (+size.value > lim.max_board) {
+        size.value = lim.max_board;
+        $("size-hint").textContent = size.value + " by " + size.value + " grid.";
+    }
+    if (+time.value > lim.max_thinking_time) time.value = lim.max_thinking_time;
+    $("time-hint").textContent =
+        "Seconds per computer move, up to " + lim.max_thinking_time +
+        ". More time, stronger play.";
 }
 
 /* ---------------------------------------------------------------- board -- */

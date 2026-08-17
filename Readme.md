@@ -28,6 +28,18 @@ AlphaZero only appears as an opponent once a network exists for that board size
 (`checkpoints/best.pt`). See [alphazero/README.md](alphazero/README.md) for
 training.
 
+## Deploying it
+
+To put the server on a machine of your own, see [DEPLOY.md](DEPLOY.md). Short
+version: Python 3.10+, `pip install -r requirements.txt` (with the CPU-only
+PyTorch index), gunicorn behind your reverse proxy, and a copy of
+`checkpoints/best.pt` — which is gitignored, so it will not arrive with the
+code. It fits a 1 GB, single-core box.
+
+One rule worth repeating here: run **one** gunicorn worker with several
+threads. Games are held in the process's memory, so a second worker process
+loses half of them.
+
 ## Where the code lives
 
 | file | role |

@@ -10,6 +10,7 @@ moves, and for AlphaZero the raw network policy/value).
 import os
 import time
 import uuid
+import threading
 from collections import OrderedDict
 
 from flask import Flask, render_template, request, jsonify
@@ -21,12 +22,22 @@ from utils import StackItException
 
 app = Flask(__name__)
 
-MAX_GAMES = 64            # LRU cap; the old server leaked one Game per page load
+
+# Hard limits. These are safety rails, not tuning knobs: a visitor picks the
+# board size and thinking time, so without them one request can pin a core for
+# a minute or chew through the box's memory. Sized for a small server (1 GB
+# RAM, 1-2 cores). Raise them if you run this somewhere bigger.
+MAX_THINKING_TIME = 5     # seconds an engine may search for one move
+MAX_BOARD = 8             # largest board a visitor may start
+MAX_GAMES = 16            # live games kept in memory; the oldest is dropped
 MAX_FRAMES = 48           # animation frames per move, oldest cascade rings kept
 
 # One AlphaZero engine per board size, shared by every game — loading the
-# checkpoint and building the evaluator is far too slow to redo per game.
+# checkpoint and building the evaluator is far too slow to redo per game. The
+# engine carries search state, so only one request may use it at a time.
 _az_engines = {}
+_az_lock = threading.Lock()
+_store_lock = threading.Lock()
 
 
 # --------------------------------------------------------------- engines ----
@@ -52,7 +63,12 @@ ENGINES = {
 
 def az_engine(size):
     """Return the AlphaZero engine for `size`x`size`, or raise with a message
-    the UI can show the user (no checkpoint / wrong board size / no torch)."""
+    the UI can show the user (no checkpoint / wrong board size / no torch).
+
+    Callers that *search* with the returned engine must hold `_az_lock`; the
+    engine keeps its MCTS tree on the instance, so two concurrent searches
+    would read and overwrite each other's nodes.
+    """
     if size in _az_engines:
         return _az_engines[size]
     try:
@@ -95,6 +111,9 @@ class Game:
         self.mcts = MonteCarloTreeSearch()
         self.moves = []                   # [(x, y), ...] in play order
         self.last_analysis = None
+        # Serialises requests touching this game. Two clicks landing at once
+        # would otherwise interleave inside board.move() and corrupt history.
+        self.lock = threading.Lock()
 
     # -- state -------------------------------------------------------------
 
@@ -272,7 +291,8 @@ def analyse_mcts(game):
 def analyse_alphazero(game):
     engine = az_engine(game.board.size_x)
     t0 = time.time()
-    info = engine.analyze(game.board, thinking_time=game.thinking_time)
+    with _az_lock:                      # the engine's search tree is not shareable
+        info = engine.analyze(game.board, thinking_time=game.thinking_time)
     elapsed = time.time() - t0
     if info is None:
         return None, None
@@ -326,17 +346,19 @@ games = OrderedDict()
 
 
 def get_game(iid):
-    g = games.get(iid)
-    if g is not None:
-        games.move_to_end(iid)
-    return g
+    with _store_lock:
+        g = games.get(iid)
+        if g is not None:
+            games.move_to_end(iid)
+        return g
 
 
 def put_game(g):
-    games[g.iid] = g
-    games.move_to_end(g.iid)
-    while len(games) > MAX_GAMES:
-        games.popitem(last=False)
+    with _store_lock:
+        games[g.iid] = g
+        games.move_to_end(g.iid)
+        while len(games) > MAX_GAMES:
+            games.popitem(last=False)
 
 
 # ------------------------------------------------------------------ API -----
@@ -356,13 +378,16 @@ def api_engines():
             available, reason = az_available(size)
         out.append({"id": eid, "name": meta["name"], "blurb": meta["blurb"],
                     "available": available, "reason": reason})
-    return jsonify({"engines": out})
+    # The form reads its own limits from here, so the caps live in one place.
+    return jsonify({"engines": out,
+                    "limits": {"max_board": MAX_BOARD,
+                               "max_thinking_time": MAX_THINKING_TIME}})
 
 
 @app.route("/api/game", methods=["POST"])
 def api_new_game():
     d = request.get_json(silent=True) or {}
-    size = max(2, min(12, int(d.get("size", 5))))
+    size = max(2, min(MAX_BOARD, int(d.get("size", 5))))
     mode = d.get("mode", "hva")
     if mode not in ("hvh", "hva"):
         mode = "hva"
@@ -370,7 +395,7 @@ def api_new_game():
     if ai not in ENGINES:
         ai = "alphabeta"
     human_seat = 2 if int(d.get("human_seat", 1)) == 2 else 1
-    thinking_time = max(1, min(60, int(d.get("thinking_time", 3))))
+    thinking_time = max(1, min(MAX_THINKING_TIME, int(d.get("thinking_time", 3))))
     max_depth = max(1, min(100, int(d.get("max_depth", 30))))
 
     if mode == "hva" and ai == "alphazero":
@@ -403,15 +428,16 @@ def api_move(iid):
         x, y = int(d["x"]), int(d["y"])
     except (KeyError, TypeError, ValueError):
         return jsonify({"error": "Bad move."}), 400
-    if (x, y) not in g.board.possible_moves():
-        return jsonify({"error": "That cell is not yours to play."}), 400
-    if g.is_ai_turn():
-        return jsonify({"error": "It is the AI's turn."}), 400
-    try:
-        frames = g.play(x, y)
-    except StackItException as e:
-        return jsonify({"error": str(e)}), 400
-    return jsonify({"state": g.state(), "frames": frames, "move": [x, y]})
+    with g.lock:
+        if (x, y) not in g.board.possible_moves():
+            return jsonify({"error": "That cell is not yours to play."}), 400
+        if g.is_ai_turn():
+            return jsonify({"error": "It is the AI's turn."}), 400
+        try:
+            frames = g.play(x, y)
+        except StackItException as e:
+            return jsonify({"error": str(e)}), 400
+        return jsonify({"state": g.state(), "frames": frames, "move": [x, y]})
 
 
 @app.route("/api/game/<iid>/ai", methods=["POST"])
@@ -419,18 +445,19 @@ def api_ai_move(iid):
     g = get_game(iid)
     if g is None:
         return jsonify({"error": "That game expired. Start a new one."}), 404
-    if not g.is_ai_turn():
-        return jsonify({"error": "Not the AI's turn."}), 400
-    try:
-        analysis, move = ANALYSERS[g.ai](g)
-    except Exception as e:
-        return jsonify({"error": f"{ENGINES[g.ai]['name']} failed: {e}"}), 500
-    if move is None:
-        return jsonify({"state": g.state(), "frames": [], "analysis": None})
-    frames = g.play(*move)
-    g.last_analysis = analysis
-    return jsonify({"state": g.state(), "frames": frames,
-                    "move": list(move), "analysis": analysis})
+    with g.lock:
+        if not g.is_ai_turn():
+            return jsonify({"error": "Not the AI's turn."}), 400
+        try:
+            analysis, move = ANALYSERS[g.ai](g)
+        except Exception as e:
+            return jsonify({"error": f"{ENGINES[g.ai]['name']} failed: {e}"}), 500
+        if move is None:
+            return jsonify({"state": g.state(), "frames": [], "analysis": None})
+        frames = g.play(*move)
+        g.last_analysis = analysis
+        return jsonify({"state": g.state(), "frames": frames,
+                        "move": list(move), "analysis": analysis})
 
 
 @app.route("/api/game/<iid>/netread")
@@ -445,7 +472,8 @@ def api_net_read(iid):
         return jsonify({"net": None})
     try:
         engine = az_engine(g.board.size_x)
-        priors, value = engine.mcts.ev.infer(g.board)
+        with _az_lock:
+            priors, value = engine.mcts.ev.infer(g.board)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -467,8 +495,9 @@ def api_undo(iid):
     g = get_game(iid)
     if g is None:
         return jsonify({"error": "That game expired. Start a new one."}), 404
-    g.undo()
-    return jsonify({"state": g.state(), "analysis": None})
+    with g.lock:
+        g.undo()
+        return jsonify({"state": g.state(), "analysis": None})
 
 
 @app.route("/api/game/<iid>/settings", methods=["POST"])
@@ -478,11 +507,18 @@ def api_settings(iid):
         return jsonify({"error": "That game expired. Start a new one."}), 404
     d = request.get_json(silent=True) or {}
     if "thinking_time" in d:
-        g.thinking_time = max(1, min(60, int(d["thinking_time"])))
+        g.thinking_time = max(1, min(MAX_THINKING_TIME, int(d["thinking_time"])))
     if "max_depth" in d:
         g.max_depth = max(1, min(100, int(d["max_depth"])))
     return jsonify({"state": g.state()})
 
 
+@app.route("/healthz")
+def healthz():
+    """Liveness probe for the service manager / reverse proxy."""
+    return jsonify({"ok": True, "games": len(games)})
+
+
 if __name__ == "__main__":
+    # Development only. In production run it through gunicorn — see DEPLOY.md.
     app.run(host="0.0.0.0", port=9999, debug=True)
