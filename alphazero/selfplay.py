@@ -18,6 +18,8 @@ survivor), while recording the completed policy as the training target. Root
 Gumbel noise is the exploration device: on for the first `temp_moves` plies (so
 the selected action varies), off afterwards (greedy).
 """
+from dataclasses import replace
+
 import numpy as np
 
 from board import Board
@@ -60,7 +62,10 @@ def play_game(evaluator, cfg, rng, opponent_ev=None):
     still diversifies the trajectories."""
     n = cfg.board_size
     mcts = MCTS(evaluator, cfg)
-    mcts_opp = MCTS(opponent_ev, cfg) if opponent_ev is not None else mcts
+    # distinct seed: MCTS seeds its Gumbel RNG from cfg.seed, so sharing cfg would
+    # make the opponent draw the exact same noise sequence as the main net.
+    mcts_opp = (MCTS(opponent_ev, replace(cfg, seed=cfg.seed + 991))
+                if opponent_ev is not None else mcts)
     main_color = 1 if opponent_ev is None else (1 if rng.random() < 0.5 else 2)
     pure_selfplay = opponent_ev is None
 

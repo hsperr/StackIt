@@ -23,6 +23,7 @@ from .config import Config
 app = Flask(__name__)
 CKPT = Config().ckpt_dir
 METRICS_FILE = Config().metrics_file
+AB_BENCH_FILE = Config().ab_bench_file
 
 # ---- interactive "play the best model" state (single local user) ----
 _play_lock = threading.Lock()
@@ -32,10 +33,13 @@ BEST_PT = os.path.join(CKPT, "best.pt")
 
 def _set_ckpt_dir(path):
     """Point the dashboard at another run directory (see --ckpt-dir)."""
-    global CKPT, BEST_PT, METRICS_FILE
+    global CKPT, BEST_PT, METRICS_FILE, AB_BENCH_FILE
     CKPT = path
     BEST_PT = os.path.join(CKPT, "best.pt")
     METRICS_FILE = os.path.join(CKPT, "metrics.jsonl")
+    # must follow the run dir too, or the 'vs AlphaBeta' chart silently plots the
+    # DEFAULT checkpoints/ benchmark rows while you watch another run.
+    AB_BENCH_FILE = os.path.join(CKPT, "ab_bench.jsonl")
 
 
 def _board_state(board):
@@ -147,7 +151,7 @@ def api_ratings():
 @app.route("/api/ab_bench")
 def api_ab_bench():
     """Strong-AlphaBeta benchmark results (one row per champion that played)."""
-    path = Config().ab_bench_file
+    path = AB_BENCH_FILE
     rows = []
     if os.path.exists(path):
         with open(path) as f:
@@ -290,43 +294,57 @@ tr.rej td:first-child{box-shadow:inset 3px 0 0 var(--slot-line)}
   <div class="stat"><span class="v" id="s-elapsed">–</span><span class="k">elapsed</span></div>
   <div class="stat"><span class="v" id="s-speed">–</span><span class="k">avg / iter</span></div>
   <div class="stat"><span class="v" id="s-buf">–</span><span class="k">buffer</span></div>
-  <div class="stat"><span class="v" id="s-elo">–</span><span class="k">best elo</span></div>
-  <div class="stat"><span class="v" id="s-rand">–</span><span class="k">win vs random</span></div>
-  <div class="stat"><span class="v" id="s-ab">–</span><span class="k">win vs AlphaBeta (5s)</span></div>
+  <div class="stat"><span class="v" id="s-elo">–</span><span class="k">elo (latest)</span></div>
+  <div class="stat"><span class="v" id="s-peak">–</span><span class="k">elo (peak)</span></div>
+  <div class="stat"><span class="v" id="s-prev">–</span><span class="k">vs previous</span></div>
+  <div class="stat"><span class="v" id="s-ab">–</span><span class="k">win vs AlphaBeta</span></div>
   <div class="stat"><span class="v" id="s-extra">–</span><span class="k" id="s-extra-k">phase</span></div>
 </div>
 <div class="wrap">
   <div style="display:flex;flex-direction:column;gap:18px">
     <div class="card">
-      <h2>Elo rating <span style="text-transform:none;font-weight:500;color:#c2cbe0">· random = 0</span></h2>
+      <h2>Elo rating <span style="text-transform:none;font-weight:500;color:#c2cbe0">· starting net v0 = 1000</span></h2>
       <div class="chart" id="w-elo"><canvas id="c-elo" width="640" height="230"></canvas>
         <div class="vline"></div><div class="tip"></div></div>
       <div class="legend">
-        <span><i class="dot" style="background:var(--good)"></i>current model</span>
-        <span><i class="dot" style="background:var(--p1)"></i>champion (best)</span>
-        <span><i class="dot" style="background:var(--p2)"></i>reference / AlphaBeta bars (dashed)</span>
+        <span><i class="dot" style="background:var(--good)"></i>this version</span>
+        <span><i class="dot" style="background:var(--p1)"></i>best so far</span>
+        <span><i class="dot" style="background:var(--p2)"></i>AlphaBeta (dashed bar)</span>
       </div>
     </div>
     <div class="card">
-      <h2>Win rate</h2>
-      <div class="chart" id="w-win"><canvas id="c-win" width="640" height="260"></canvas>
+      <h2>Strength <span style="text-transform:none;font-weight:500;color:#c2cbe0">· 50% = equal</span></h2>
+      <div class="chart" id="w-win"><canvas id="c-win" width="640" height="240"></canvas>
         <div class="vline"></div><div class="tip"></div></div>
       <div class="legend">
-        <span><i class="dot" style="background:var(--good)"></i>vs random</span>
-        <span><i class="dot" style="background:var(--p2)"></i>vs AlphaBeta</span>
-        <span><i class="dot" style="background:#8b5cf6"></i><span id="leg-ref">vs reference</span></span>
-        <span><i class="dot" style="background:var(--p1)"></i>gate (cand vs best)</span>
-        <span><i class="dot" style="background:rgba(24,160,88,.35)"></i>accepted</span>
+        <span><i class="dot" style="background:var(--p1)"></i>vs previous version</span>
+        <span><i class="dot" style="background:var(--p2)"></i>vs AlphaBeta 0.3s</span>
+        <span><i class="dot" style="background:#8b5cf6"></i>vs AlphaBeta 5s</span>
       </div>
     </div>
     <div class="card">
-      <h2>Training loss</h2>
+      <h2>Loss <span style="text-transform:none;font-weight:500;color:#c2cbe0">· dashed = held-out</span></h2>
       <div class="chart" id="w-loss"><canvas id="c-loss" width="640" height="220"></canvas>
         <div class="vline"></div><div class="tip"></div></div>
       <div class="legend">
-        <span><i class="dot" style="background:var(--p1)"></i>policy</span>
-        <span><i class="dot" style="background:var(--p2)"></i>value</span>
+        <span><i class="dot" style="background:var(--p1)"></i>policy (train)</span>
+        <span><i class="dot" style="background:#8fbaff"></i>policy (held-out)</span>
+        <span><i class="dot" style="background:var(--p2)"></i>value (train)</span>
+        <span><i class="dot" style="background:#ffc182"></i>value (held-out)</span>
       </div>
+      <p class="sub" style="font-size:12px;margin:8px 0 0">A gap opening between a solid line and
+      its dashed twin means the net is memorising the replay buffer.</p>
+    </div>
+    <div class="card">
+      <h2>Is it learning? <span style="text-transform:none;font-weight:500;color:#c2cbe0">· held-out</span></h2>
+      <div class="chart" id="w-acc"><canvas id="c-acc" width="640" height="200"></canvas>
+        <div class="vline"></div><div class="tip"></div></div>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--good)"></i>policy top-1 (net pick = search pick)</span>
+        <span><i class="dot" style="background:#8b5cf6"></i>value sign correct</span>
+      </div>
+      <p class="sub" style="font-size:12px;margin:8px 0 0">Top-1 starts near 1/25 = 4% and must
+      climb. Value sign starts at 50%. Both flat = no learning.</p>
     </div>
   </div>
   <div class="card">
@@ -355,7 +373,7 @@ tr.rej td:first-child{box-shadow:inset 3px 0 0 var(--slot-line)}
 
     <div class="logwrap">
       <table class="log">
-        <thead><tr><th>iter</th><th>elo</th><th>games</th><th>vs</th><th>gate</th><th>rnd</th><th>AB</th></tr></thead>
+        <thead><tr><th>iter</th><th>elo</th><th>games</th><th>vs prev</th><th>AB</th><th>pol</th><th>top1</th></tr></thead>
         <tbody id="logbody"></tbody>
       </table>
     </div>
@@ -402,9 +420,9 @@ function draw(canvas, series, ymin, ymax, xmax, accepted, hlines){
   // series
   for(const s of series){
     const pts=s.pts.filter(p=>p.y!=null&&!isNaN(p.y));if(!pts.length)continue;
-    ctx.setLineDash([]);ctx.strokeStyle=s.color;ctx.lineWidth=2.5;ctx.beginPath();
+    ctx.setLineDash(s.dash||[]);ctx.strokeStyle=s.color;ctx.lineWidth=s.w||2.5;ctx.beginPath();
     pts.forEach((p,i)=>{const a=X(p.x),b=Y(p.y);i?ctx.lineTo(a,b):ctx.moveTo(a,b);});
-    ctx.stroke();ctx.lineWidth=1;ctx.fillStyle=s.color;
+    ctx.stroke();ctx.setLineDash([]);ctx.lineWidth=1;ctx.fillStyle=s.color;
     const dotPts=s.dots?pts:[pts[pts.length-1]];      // mark every point for sparse series
     for(const p of dotPts){ctx.beginPath();ctx.arc(X(p.x),Y(p.y),3.5,0,7);ctx.fill();}
   }
@@ -437,68 +455,89 @@ async function refreshMetrics(){
   try{AB_BENCH=await(await fetch('/api/ab_bench')).json();}catch(e){}
   const byId={};(RATINGS.versions||[]).forEach(v=>{byId[v.id]=v;});RATED=byId;
   const xmax=Math.max(1,rows.length?rows[rows.length-1].iter:1);
-  const accepted=rows.filter(r=>r.accepted).map(r=>r.iter);
-  // Elo must come from the CURRENT global fit (RATED), never from r.elo/r.best_elo.
-  // Those columns are snapshots of *different* Bradley-Terry fits: the one at iter k
-  // saw only versions <= k, so its scale differs from the one at iter k+50. Plotting
-  // the stored column shows refit noise (+-80 Elo) and hides the real trend; the
-  // single current fit over the whole result book is the only comparable series.
-  let champ=0;
-  rows.forEach(r=>{if(r.accepted)champ=r.iter;
-    const c=RATED['v'+r.iter],b=RATED['v'+champ];
-    r._elo=c&&c.elo!=null?c.elo:r.elo;
-    r._best_elo=b&&b.elo!=null?b.elo:r.best_elo;});
+
+  // ---------- Elo ----------
+  // Always read Elo from the CURRENT global Bradley-Terry fit (RATED), never from the
+  // stored r.elo column. Each stored value is a snapshot of a DIFFERENT fit (the one at
+  // iter k only saw versions <= k), so plotting the column shows refit noise, not trend.
+  // `peak` is a running max, so the blue line can never go down — that is the honest
+  // "best model so far", which the old chart got wrong by tracking the latest champion.
+  let peak=null;
+  rows.forEach(r=>{
+    const c=RATED['v'+r.iter];
+    r._elo=(c&&c.elo!=null)?c.elo:null;
+    if(r._elo!=null)peak=(peak==null)?r._elo:Math.max(peak,r._elo);
+    r._peak=peak;});
   const eloCur=rows.map(r=>({x:r.iter,y:r._elo}));
-  const eloBest=rows.map(r=>({x:r.iter,y:r._best_elo}));
-  const refs=(RATINGS.versions||[]).filter(v=>v.ref);
-  const hlines=refs.map(v=>({y:v.elo,label:v.id.replace('ref:',''),color:'rgba(224,109,0,.7)'}));
-  const evals=eloCur.concat(eloBest).map(p=>p.y).filter(v=>v!=null&&!isNaN(v))
-                    .concat(refs.map(v=>v.elo)).concat([0]);
+  const eloPeak=rows.map(r=>({x:r.iter,y:r._peak}));
+  const anchorVal=(RATINGS.anchor_value!=null)?RATINGS.anchor_value:1000;
+  const hlines=[{y:anchorVal,label:'start net',color:'rgba(154,163,189,.8)'}];
+  const abElo=(RATED['alphabeta']||{}).elo;
+  if(abElo!=null)hlines.push({y:abElo,label:'AlphaBeta '+(RATINGS.ab_budget||0.3)+'s',
+                              color:'rgba(224,109,0,.8)'});
+  const evals=eloCur.concat(eloPeak).map(p=>p.y).filter(v=>v!=null&&!isNaN(v))
+                    .concat(hlines.map(h=>h.y));
   let emin=Math.min(...evals),emax=Math.max(...evals);
   const epad=(emax-emin)*0.15||40;emin-=epad;emax+=epad;
-  draw($('c-elo'),[{color:css('--good'),pts:eloCur},{color:css('--p1'),pts:eloBest}],
-       emin,emax,xmax,accepted,hlines);
-  const pol=rows.map(r=>({x:r.iter,y:r.policy_loss}));
-  const val=rows.map(r=>({x:r.iter,y:r.value_loss}));
-  const clean=pol.concat(val).map(p=>p.y).filter(v=>v!=null&&!isNaN(v));
-  const lmax=Math.max(0.6,...clean);
-  draw($('c-loss'),[{color:css('--p1'),pts:pol},{color:css('--p2'),pts:val}],0,lmax,xmax);
-  const rnd=rows.map(r=>({x:r.iter,y:r.winrate_vs_random}));
-  // strong-AlphaBeta (5s) benchmark: one point per champion that played, at its iter
-  const ab=(AB_BENCH||[]).map(r=>({x:r.champion_iter,y:r.winrate}));
-  const ref=rows.map(r=>({x:r.iter,y:r.winrate_vs_reference}));
-  const gate=rows.map(r=>({x:r.iter,y:r.cand_winrate_vs_best}));
-  const refName=(rows.find(r=>r.reference_id)||{}).reference_id;
-  if(refName)$('leg-ref').textContent='vs '+refName;
+  draw($('c-elo'),[{color:css('--p1'),pts:eloPeak,w:1.5,dash:[5,4]},
+                   {color:css('--good'),pts:eloCur}],emin,emax,xmax,null,hlines);
+
+  // ---------- Strength ----------
+  const prev=rows.map(r=>({x:r.iter,y:r.cand_winrate_vs_best}));
+  const abLight=rows.filter(r=>r.winrate_vs_ab_light!=null)
+                    .map(r=>({x:r.iter,y:r.winrate_vs_ab_light}));
+  const ab5=(AB_BENCH||[]).map(r=>({x:r.champion_iter,y:r.winrate}));
   const half=[{x:1,y:0.5},{x:xmax,y:0.5}];
-  draw($('c-win'),[{color:'#dfe4ef',pts:half},{color:css('--good'),pts:rnd},
-     {color:css('--p2'),pts:ab,dots:true},{color:'#8b5cf6',pts:ref},{color:css('--p1'),pts:gate}],0,1,xmax,accepted);
-  // counters
+  draw($('c-win'),[{color:'#dfe4ef',pts:half,w:1.5},
+                   {color:css('--p1'),pts:prev},
+                   {color:css('--p2'),pts:abLight,dots:true},
+                   {color:'#8b5cf6',pts:ab5,dots:true}],0,1,xmax);
+
+  // ---------- Loss (train solid, held-out dashed) ----------
+  const pol=rows.map(r=>({x:r.iter,y:r.policy_loss}));
+  const vpol=rows.map(r=>({x:r.iter,y:r.val_policy_loss}));
+  const val=rows.map(r=>({x:r.iter,y:r.value_loss}));
+  const vval=rows.map(r=>({x:r.iter,y:r.val_value_loss}));
+  const clean=pol.concat(vpol,val,vval).map(p=>p.y).filter(v=>v!=null&&!isNaN(v));
+  const lmax=Math.max(0.6,...clean);
+  draw($('c-loss'),[{color:css('--p1'),pts:pol},
+                    {color:'#8fbaff',pts:vpol,dash:[5,4]},
+                    {color:css('--p2'),pts:val},
+                    {color:'#ffc182',pts:vval,dash:[5,4]}],0,lmax,xmax);
+
+  // ---------- Is it learning? ----------
+  const top1=rows.map(r=>({x:r.iter,y:r.policy_top1}));
+  const vsign=rows.map(r=>({x:r.iter,y:r.value_sign_acc}));
+  draw($('c-acc'),[{color:css('--good'),pts:top1},{color:'#8b5cf6',pts:vsign}],0,1,xmax,null,
+       [{y:0.5,label:'coin flip',color:'rgba(154,163,189,.7)'}]);
+
+  // ---------- counters ----------
   const done=rows.length;
   const sumSec=rows.reduce((a,r)=>a+(r.iter_sec||0),0);
   if(done!==_rowCount){_rowCount=done;_elapsedBase=sumSec;_baseAt=performance.now();}
   $('s-speed').textContent=done?(sumSec/done).toFixed(0)+'s':'–';
   if(done){const last=rows[done-1];
-    $('s-elo').textContent=last._best_elo!=null?Math.round(last._best_elo):'–';
-    $('s-rand').textContent=fmtPct(last.winrate_vs_random);
-    $('s-ab').textContent=(AB_BENCH&&AB_BENCH.length)?fmtPct(AB_BENCH[AB_BENCH.length-1].winrate):'–';}
+    $('s-elo').textContent=last._elo!=null?Math.round(last._elo):'–';
+    $('s-peak').textContent=last._peak!=null?Math.round(last._peak):'–';
+    $('s-prev').textContent=fmtPct(last.cand_winrate_vs_best);
+    const lastAb=abLight.length?abLight[abLight.length-1].y:null;
+    $('s-ab').textContent=fmtPct(lastAb);}
   renderTable(rows);
 }
 
 function renderTable(rows){
   let html='';
   for(let i=rows.length-1;i>=0&&i>rows.length-1-50;i--){
-    const r=rows[i], gated=r.cand_winrate_vs_best!=null;
-    const cls=gated?(r.accepted?'acc':'rej'):'';
-    const tag=gated?(r.accepted?'<span class="tag acc">ACC</span>':'<span class="tag rej">rej</span>'):'';
-    const gatev=gated?Math.round(r.cand_winrate_vs_best*100)+'% '+tag:'—';
+    const r=rows[i];
     const live=RATED['v'+r.iter]||{};                     // latest Elo + game count
-    const elo=live.elo!=null?Math.round(live.elo):(r.elo==null?'–':Math.round(r.elo));
+    const elo=live.elo!=null?Math.round(live.elo):'–';
     const gm=live.games!=null?live.games:'';
-    const vs=r.version==null?'?':('v'+r.version);      // previous best it was gated against
-    const abm=(AB_BENCH||[]).find(a=>a.champion_iter===r.iter);   // strong-AB result, if this champ played
-    html+=`<tr class="${cls}"><td>#${r.iter}</td><td>${elo}</td><td>${gm}</td><td>${vs}</td><td>${gatev}</td>`+
-          `<td>${fmtPct(r.winrate_vs_random)}</td><td>${abm?fmtPct(abm.winrate):'–'}</td></tr>`;
+    const vs=r.cand_winrate_vs_best==null?'—':Math.round(r.cand_winrate_vs_best*100)+'%';
+    const ab=r.winrate_vs_ab_light==null?'–':Math.round(r.winrate_vs_ab_light*100)+'%';
+    const pl=r.policy_loss==null||isNaN(r.policy_loss)?'–':r.policy_loss.toFixed(2);
+    const t1=r.policy_top1==null?'–':Math.round(r.policy_top1*100)+'%';
+    html+=`<tr><td>#${r.iter}</td><td>${elo}</td><td>${gm}</td><td>${vs}</td>`+
+          `<td>${ab}</td><td>${pl}</td><td>${t1}</td></tr>`;
   }
   $('logbody').innerHTML=html;
 }
@@ -622,17 +661,24 @@ function showStats(s){
 }
 
 hookHover('w-elo','c-elo',()=>[
-  {label:'current model',color:css('--good'),get:r=>r._elo,fmt:v=>v.toFixed(0)},
-  {label:'champion',color:css('--p1'),get:r=>r._best_elo,fmt:v=>v.toFixed(0)},
-  {label:'games',color:'#9aa3bd',get:r=>(RATED['v'+r.iter]||{}).games,fmt:v=>String(v)}]);
-hookHover('w-loss','c-loss',()=>[
-  {label:'policy',color:css('--p1'),get:r=>r.policy_loss,fmt:v=>v.toFixed(3)},
-  {label:'value',color:css('--p2'),get:r=>r.value_loss,fmt:v=>v.toFixed(3)}]);
+  {label:'this version',color:css('--good'),get:r=>r._elo,fmt:v=>v.toFixed(0)},
+  {label:'best so far',color:css('--p1'),get:r=>r._peak,fmt:v=>v.toFixed(0)},
+  {label:'games rated on',color:'#9aa3bd',get:r=>(RATED['v'+r.iter]||{}).games,fmt:v=>String(v)}]);
 hookHover('w-win','c-win',()=>[
-  {label:'vs random',color:css('--good'),get:r=>r.winrate_vs_random,fmt:fmtPct},
-  {label:'vs AlphaBeta (5s)',color:css('--p2'),get:r=>{const m=(AB_BENCH||[]).find(a=>a.champion_iter===r.iter);return m?m.winrate:null;},fmt:fmtPct},
-  {label:'vs reference',color:'#8b5cf6',get:r=>r.winrate_vs_reference,fmt:fmtPct},
-  {label:'gate',color:css('--p1'),get:r=>r.cand_winrate_vs_best,fmt:fmtPct}]);
+  {label:'vs previous version',color:css('--p1'),get:r=>r.cand_winrate_vs_best,fmt:fmtPct},
+  {label:'vs AlphaBeta 0.3s',color:css('--p2'),get:r=>r.winrate_vs_ab_light,fmt:fmtPct},
+  {label:'vs AlphaBeta 5s',color:'#8b5cf6',
+   get:r=>{const m=(AB_BENCH||[]).find(a=>a.champion_iter===r.iter);return m?m.winrate:null;},
+   fmt:fmtPct}]);
+hookHover('w-loss','c-loss',()=>[
+  {label:'policy (train)',color:css('--p1'),get:r=>r.policy_loss,fmt:v=>v.toFixed(3)},
+  {label:'policy (held-out)',color:'#8fbaff',get:r=>r.val_policy_loss,fmt:v=>v.toFixed(3)},
+  {label:'value (train)',color:css('--p2'),get:r=>r.value_loss,fmt:v=>v.toFixed(3)},
+  {label:'value (held-out)',color:'#ffc182',get:r=>r.val_value_loss,fmt:v=>v.toFixed(3)}]);
+hookHover('w-acc','c-acc',()=>[
+  {label:'policy top-1',color:css('--good'),get:r=>r.policy_top1,fmt:fmtPct},
+  {label:'value sign',color:'#8b5cf6',get:r=>r.value_sign_acc,fmt:fmtPct},
+  {label:'held-out positions',color:'#9aa3bd',get:r=>r.val_positions,fmt:v=>String(v)}]);
 
 refreshMetrics();refreshStatus();refreshGame().then(renderFrame);
 setInterval(refreshMetrics,2500);

@@ -167,25 +167,42 @@ class MCTS:
         return np.where(root.child_N > 0,
                         root.child_W / np.maximum(root.child_N, 1), 0.0)
 
-    def _completed_policy(self, root, logits):
-        """Gumbel 'completed policy': softmax over legal of logits + sigma(q_comp),
-        where visited actions use their search Q and unvisited use the mixed value
-        v_mix. This is the improved-policy training target."""
-        N, W = root.child_N, root.child_W
+    def _q_completed(self, root):
+        """Per-action Q with unvisited actions filled in by the mixed value
+        v_mix (Gumbel paper eq. 'completed Q')."""
+        N = root.child_N
         q = self._q(root)
-        prior = np.exp(logits - logits.max())
-        prior /= prior.sum()
         sum_N = N.sum()
         if sum_N > 0:
+            prior = root.priors
             vis = N > 0
             denom = prior[vis].sum()
             wq = (prior[vis] * q[vis]).sum() / denom if denom > 0 else root.value
             v_mix = (root.value + sum_N * wq) / (1.0 + sum_N)
         else:
             v_mix = root.value
-        q_comp = np.where(N > 0, q, v_mix)
-        sigma = (self.c_visit + N.max()) * self.c_scale * q_comp
-        z = logits + sigma
+        return np.where(N > 0, q, v_mix)
+
+    def _sigma(self, root, q_comp):
+        """mctx's `qtransform_completed_by_mix_value`: rescale the completed Q to
+        [0, 1] FIRST, then scale by (c_visit + max_N) * c_scale.
+
+        Both halves matter. Skipping the rescale (Q in [-1, 1]) and using
+        c_scale=1.0 makes sigma ~20x larger than the prior logits, so the
+        completed policy collapses to a near-one-hot pick driven by search noise
+        (measured target entropy 0.005-0.76 out of 3.22 on 5x5) and Sequential
+        Halving ignores its own Gumbel noise. mctx uses value_scale=0.1 on
+        rescaled Q; c_scale in config.py now matches."""
+        lo, hi = q_comp.min(), q_comp.max()
+        span = hi - lo
+        q = (q_comp - lo) / span if span > 1e-8 else np.zeros_like(q_comp)
+        return (self.c_visit + root.child_N.max()) * self.c_scale * q
+
+    def _completed_policy(self, root, logits):
+        """Gumbel 'completed policy': softmax over legal of logits + sigma(q_comp),
+        where visited actions use their search Q and unvisited use the mixed value
+        v_mix. This is the improved-policy training target."""
+        z = logits + self._sigma(root, self._q_completed(root))
         z -= z.max()
         p = np.exp(z)
         p /= p.sum()
@@ -234,7 +251,7 @@ class MCTS:
                     break
             if n_cand <= 1:
                 break
-            scores = g + logits + (self.c_visit + root.child_N.max()) * self.c_scale * self._q(root)
+            scores = g + logits + self._sigma(root, self._q_completed(root))
             cand = sorted(cand, key=lambda a: scores[a], reverse=True)[:max(1, n_cand // 2)]
 
         while remaining > 0:                         # spend any rounding remainder on the leader

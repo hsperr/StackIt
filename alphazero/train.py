@@ -1,8 +1,12 @@
 """The AlphaZero training loop for StackIt.
 
 One iteration = self-play (generate data) -> train (fit net to MCTS policy +
-outcomes) -> gate (candidate vs previous best; revert if it doesn't clear the
-win threshold) -> benchmark (vs random & AlphaBeta for an absolute signal).
+outcomes) -> evaluate (vs previous best, past versions, AlphaBeta, random) for
+Elo and a progress signal.
+
+Gating is OFF by default (cfg.use_gate) — modern AlphaZero and KataGo do not
+gate. Set it True for the classic "revert the candidate unless it beats the
+previous best" behaviour.
 
 Device split: MCTS self-play/eval run on CPU (batch-1 forwards are faster there
 on this tiny net); training runs batched on MPS/CUDA if available.
@@ -14,6 +18,7 @@ Run:  python3 -m alphazero.train                 # full run, sane 5x5 defaults
 import os
 import sys
 import copy
+import math
 import time
 import json
 import argparse
@@ -49,11 +54,50 @@ def train_net(net, opt, buffer, cfg, device, steps):
         loss = policy_loss + value_loss + cfg.own_loss_weight * own_loss
         opt.zero_grad()
         loss.backward()
+        if cfg.grad_clip:
+            torch.nn.utils.clip_grad_norm_(net.parameters(), cfg.grad_clip)
         opt.step()
         tot_p += policy_loss.item()
         tot_v += value_loss.item()
         tot_o += own_loss.item()
     return tot_p / steps, tot_v / steps, tot_o / steps
+
+
+@torch.no_grad()
+def eval_net(net, val_buffer, cfg, device):
+    """Held-out metrics. These positions were split off before augmentation and
+    never entered the replay buffer, so this is the only number here that can
+    show overfitting: watch the gap between train and val policy loss.
+
+    Also returns two accuracies that read more directly than a loss:
+      * top1  — how often the net's best move IS the search's best move
+                (starts at ~1/actions, climbs as the policy learns)
+      * vsign — how often the value head gets the winner's sign right
+                (starts at 0.5)"""
+    n = len(val_buffer)
+    if n == 0:
+        return (float("nan"),) * 4
+    net.eval()
+    nb = net.board_size
+    tp = tv = 0.0
+    hit = sign_hit = sign_tot = 0
+    seen = 0
+    for i in range(0, n, cfg.batch_size):
+        chunk = [val_buffer.buf[j] for j in range(i, min(i + cfg.batch_size, n))]
+        planes = torch.from_numpy(np.stack([c[0] for c in chunk])).to(device)
+        pi = torch.from_numpy(np.stack([c[1] for c in chunk])).to(device)
+        z = torch.from_numpy(np.array([c[2] for c in chunk], dtype=np.float32)).to(device)
+        logits, v, _ = net(planes)
+        b = len(chunk)
+        tp += float(-(pi * F.log_softmax(logits, dim=1)).sum(dim=1).sum())
+        tv += float(F.mse_loss(v, z, reduction="sum"))
+        hit += int((logits.argmax(dim=1) == pi.argmax(dim=1)).sum())
+        decided = z != 0
+        sign_tot += int(decided.sum())
+        sign_hit += int(((torch.sign(v) == torch.sign(z)) & decided).sum())
+        seen += b
+    return (tp / seen, tv / seen, hit / seen,
+            sign_hit / sign_tot if sign_tot else float("nan"))
 
 
 def _load_ckpt(path):
@@ -157,8 +201,11 @@ def run(cfg, resume=False, references_dir=None):
     metrics.ensure_dir(cfg)
 
     net = StackNet(cfg.board_size, cfg.channels, cfg.res_blocks)
-    opt = torch.optim.Adam(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    # AdamW, not Adam: Adam folds weight_decay into the gradient, and its per-parameter
+    # scaling then decays low-gradient weights far harder than intended. AdamW decouples it.
+    opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     buffer = ReplayBuffer(cfg.replay_capacity)
+    val_buffer = ReplayBuffer(cfg.val_capacity)   # held out, never trained on
     pool = make_pool(cfg.num_workers)
     print(f"[cfg] {cfg.num_workers} CPU self-play/eval workers")
 
@@ -170,6 +217,8 @@ def run(cfg, resume=False, references_dir=None):
     best_iter = 0
     n_champions = 0
     champion_ids = []                       # accepted-lineage ids, for the self-play pool
+    ab_history = []                         # winrate of each AlphaBeta match played
+    ab_beaten = False                       # True once AB stops being informative
 
     # --resume: load best.pt weights + restore version registry, match history, and
     # the iteration counter, so training genuinely continues (not just "don't wipe").
@@ -200,6 +249,8 @@ def run(cfg, resume=False, references_dir=None):
                     rows = [json.loads(l) for l in f if l.strip()]
                 if rows:
                     start_iter = max(r["iter"] for r in rows)
+                    ab_history = [r["winrate_vs_ab_light"] for r in rows
+                                  if r.get("winrate_vs_ab_light") is not None]
                     accepted_iters = [r["iter"] for r in rows if r.get("accepted")]
                     n_champions = len(accepted_iters)
             # rebuild the full champion lineage (not just the current best) so the
@@ -256,7 +307,7 @@ def run(cfg, resume=False, references_dir=None):
         print(f"[cfg] {len(ref_ids)} reference opponent(s): {ref_ids}")
         seed_reference_book(book, registry, ref_ids, cfg, pool, rng)
 
-    elo = (compute_elo(book, anchor="random", anchor_elo=0.0,
+    elo = (compute_elo(book, anchor=cfg.elo_anchor, anchor_elo=cfg.elo_anchor_value,
                        prior_draws=cfg.elo_prior_draws) if book.d else {})
     # the reference tracked in the win-rate chart (strongest one; one is enough)
     primary_ref = max(ref_ids, key=lambda i: elo.get(i, -1e9)) if ref_ids else None
@@ -283,6 +334,13 @@ def run(cfg, resume=False, references_dir=None):
         examples, last_record = selfplay_parallel(
             net, cfg, cfg.games_per_iter, base_seed=cfg.seed + it * 100000,
             pool=pool, n_workers=cfg.num_workers, opponent_pool=opponent_pool)
+        # Hold out a slice of the FRESH positions before augmentation, so no
+        # symmetry of a validation position can leak into the training buffer.
+        n_val = int(len(examples) * cfg.val_frac)
+        if n_val:
+            perm = rng.permutation(len(examples))
+            val_buffer.add_many([examples[i] for i in perm[:n_val]])
+            examples = [examples[i] for i in perm[n_val:]]
         aug = expand_symmetries(examples, cfg)
         buffer.add_many(aug)
         added = len(aug)
@@ -292,60 +350,96 @@ def run(cfg, resume=False, references_dir=None):
 
         # ------------------------------------------------------ train (GPU)
         metrics.write_status(cfg, {"iter": it, "phase": "train", "buffer": len(buffer)})
+        t_train = time.time()
         net.to(train_device)
         # Snapshot the PREVIOUS best (weights + optimizer momentum) BEFORE training,
         # so a rejected candidate can be fully reverted — net AND optimizer state.
         # (Snapshotting after training would capture the candidate, not the best.)
-        prev_best_state = copy.deepcopy(net.state_dict())
-        prev_best_opt = copy.deepcopy(opt.state_dict())
+        prev_best_state = copy.deepcopy(net.state_dict()) if cfg.use_gate else None
+        prev_best_opt = copy.deepcopy(opt.state_dict()) if cfg.use_gate else None
+        # cosine LR decay from cfg.lr down to cfg.lr_min across the whole run
+        frac = min(it, cfg.iterations) / max(cfg.iterations, 1)
+        lr_now = cfg.lr_min + 0.5 * (cfg.lr - cfg.lr_min) * (1.0 + math.cos(math.pi * frac))
+        for gparam in opt.param_groups:
+            gparam["lr"] = lr_now
         steps = cfg.train_steps_per_iter if len(buffer) >= cfg.batch_size else 0
         if steps:
             pol_loss, val_loss, own_loss = train_net(net, opt, buffer, cfg, train_device, steps)
         else:
             pol_loss = val_loss = own_loss = float("nan")
+        v_pol, v_val, v_top1, v_sign = eval_net(net, val_buffer, cfg, train_device)
+        tr_time = time.time() - t_train
 
         # ---------------- gate (normal AlphaZero) + benchmarks incl. reference
         net.to(cpu)
         base = cfg.seed + it * 100000
         cand_wr = None
         accepted = False
-        wr_random = wr_ab = wr_ref = 0.0
-        cand_elo = 0.0
+        wr_random = wr_ref = 0.0
+        wr_ab_light = None
+        cand_elo = None                    # None on non-eval iterations -> chart skips it
         best_elo = elo.get(f"v{best_iter}", 0.0)
         opponent_iter = best_iter          # previous best this candidate is gated against
 
-        if steps:
+        # Evaluation is expensive (at eval_every=1 the match games cost about as much
+        # as self-play itself). Run the whole block only every Nth iteration so the
+        # clock goes into learning; Elo/gate points simply appear less often.
+        do_eval = steps and (it % cfg.eval_every == 0 or it == cfg.iterations)
+        if do_eval:
             metrics.save_version(cfg, net, it)
             registry[cand_id] = {"path": os.path.join(cfg.ckpt_dir, "versions", f"v{it}.pt"),
                                  "arch": net.arch(), "iter": it, "ref": False}
             version_ids.append(cand_id)
             a_arch, a_state = net_arch_state(net)
 
-            # gate: candidate vs the PREVIOUS BEST (own lineage) — decides acceptance.
+            # Candidate vs the PREVIOUS BEST. With cfg.use_gate it decides
+            # acceptance (classic AlphaZero); without it, it is only a progress
+            # line + the Elo chain link to the immediate predecessor, and every
+            # candidate is accepted (modern AlphaZero / KataGo). Gating threw
+            # away ~2/3 of all training on the previous run: once the true gain
+            # per iteration drops below the 20-game gate noise, accept/reject is
+            # a coin flip and each reject un-does a full iteration of SGD.
             # eval matches run at reduced sims (ecfg) — same for both sides, so fair.
             metrics.write_status(cfg, {"iter": it, "phase": "gate", "buffer": len(buffer)})
+            n_vs_best = cfg.eval_games if cfg.use_gate else cfg.gauntlet_games
             wa, wb, dr = match_parallel(a_arch, a_state, _az_opp(registry, f"v{best_iter}"), ecfg,
-                                        cfg.eval_games, base + 50000, pool, cfg.num_workers)
+                                        n_vs_best, base + 50000, pool, cfg.num_workers)
             cand_wr = win_rate(wa, wb, dr)
-            accepted = cand_wr >= cfg.eval_win_threshold
+            accepted = (cand_wr >= cfg.eval_win_threshold) if cfg.use_gate else True
             book.add_match(cand_id, f"v{best_iter}", wa, wb, dr)
 
-            # benchmarks: random (Elo anchor) + reference. AlphaBeta is NOT here —
-            # it runs off the hot loop as a strong background benchmark (ab_bench.py).
             metrics.write_status(cfg, {"iter": it, "phase": "benchmark", "buffer": len(buffer)})
-            wa, wb, dr = match_parallel(a_arch, a_state, ("random", None), ecfg,
-                                        cfg.benchmark_games, base + 70000, pool, cfg.num_workers)
-            wr_random = win_rate(wa, wb, dr)
-            book.add_match(cand_id, "random", wa, wb, dr)
+            if cfg.benchmark_games > 0:          # off by default — the net sweeps random
+                wa, wb, dr = match_parallel(a_arch, a_state, ("random", None), ecfg,
+                                            cfg.benchmark_games, base + 70000, pool, cfg.num_workers)
+                wr_random = win_rate(wa, wb, dr)
+                book.add_match(cand_id, "random", wa, wb, dr)
 
-            # fixed-budget AlphaBeta: a stable sparring partner rated in the SAME
-            # Elo pool. Its rating firms up as champions keep playing it, and you
-            # can watch the champions climb past it over time. (This is the light
-            # 0.3s AB; the heavier 5s benchmark still runs off-loop in ab_bench.)
-            if cfg.ab_elo_games > 0:
+            # Fixed-budget AlphaBeta: the one opponent from outside our own lineage,
+            # rated in the SAME Elo pool so it draws as a bar on the chart. Once the
+            # net beats it reliably it stops carrying information (same trap `random`
+            # fell into), so we stop playing it every iteration and only re-check
+            # every `ab_recheck_every` — enough to keep its bar linked to the current
+            # versions without paying for it forever.
+            play_ab = cfg.ab_elo_games > 0 and (not ab_beaten
+                                                or it % cfg.ab_recheck_every == 0)
+            if play_ab:
                 wa, wb, dr = match_parallel(a_arch, a_state, ("alphabeta", cfg.alphabeta_budget),
                                             ecfg, cfg.ab_elo_games, base + 73000, pool, cfg.num_workers)
+                wr_ab_light = win_rate(wa, wb, dr)
+                ab_history.append(wr_ab_light)
                 book.add_match(cand_id, "alphabeta", wa, wb, dr)
+                win = cfg.ab_stop_window
+                recent = (sum(ab_history[-win:]) / win) if len(ab_history) >= win else 0.0
+                if recent >= cfg.ab_stop_winrate and not ab_beaten:
+                    ab_beaten = True
+                    print(f"[ab] AlphaBeta({cfg.alphabeta_budget}s) beaten "
+                          f"({recent:.0%} over last {win}) — from now on only re-checked "
+                          f"every {cfg.ab_recheck_every} iterations")
+                elif recent < cfg.ab_stop_winrate and ab_beaten:
+                    ab_beaten = False
+                    print(f"[ab] AlphaBeta({cfg.alphabeta_budget}s) back in play "
+                          f"({recent:.0%} over last {win})")
 
             if primary_ref is not None:
                 wa, wb, dr = match_parallel(a_arch, a_state, _az_opp(registry, primary_ref), ecfg,
@@ -361,7 +455,7 @@ def run(cfg, resume=False, references_dir=None):
                                             pool, cfg.num_workers)
                 book.add_match(cand_id, oid, wa, wb, dr)
 
-            elo = compute_elo(book, anchor="random", anchor_elo=0.0,
+            elo = compute_elo(book, anchor=cfg.elo_anchor, anchor_elo=cfg.elo_anchor_value,
                               prior_draws=cfg.elo_prior_draws)
             cand_elo = elo.get(cand_id, 0.0)
 
@@ -396,7 +490,9 @@ def run(cfg, resume=False, references_dir=None):
                                  "elo": round(elo["alphabeta"], 1),
                                  "games": int(games.get("alphabeta", 0)), "best": False})
         metrics.write_ratings(cfg, {
-            "anchor": "random", "best_iter": best_iter, "primary_ref": primary_ref,
+            "anchor": cfg.elo_anchor, "anchor_value": cfg.elo_anchor_value,
+            "ab_budget": cfg.alphabeta_budget,
+            "best_iter": best_iter, "primary_ref": primary_ref,
             "elo": {k: round(v, 1) for k, v in elo.items()},
             "versions": version_rows,
             "results": book.to_list(),
@@ -411,29 +507,46 @@ def run(cfg, resume=False, references_dir=None):
         row = {
             "iter": it,
             "version": opponent_iter,           # previous best this iteration played (gate)
-            "elo": round(cand_elo, 1),          # this iteration's model (random = 0)
+            "elo": None if cand_elo is None else round(cand_elo, 1),
             "best_elo": round(best_elo, 1),
             "elo_alphabeta": 0.0,               # random is the anchor now
+            "lr": round(lr_now, 6),
             "policy_loss": round(pol_loss, 4),
             "value_loss": round(val_loss, 4),
             "own_loss": round(own_loss, 4),
+            # held-out (never trained on): the train/val gap is the overfitting signal
+            "val_policy_loss": None if v_pol != v_pol else round(v_pol, 4),
+            "val_value_loss": None if v_val != v_val else round(v_val, 4),
+            "policy_top1": None if v_top1 != v_top1 else round(v_top1, 4),
+            "value_sign_acc": None if v_sign != v_sign else round(v_sign, 4),
+            "val_positions": len(val_buffer),
             "cand_winrate_vs_best": None if cand_wr is None else round(cand_wr, 3),
             "accepted": accepted,
-            "winrate_vs_random": round(wr_random, 3),
+            "winrate_vs_random": round(wr_random, 3) if cfg.benchmark_games else None,
+            "winrate_vs_ab_light": wr_ab_light if wr_ab_light is None else round(wr_ab_light, 3),
             "winrate_vs_alphabeta": None if ab_wr is None else round(ab_wr, 3),
             "winrate_vs_reference": round(wr_ref, 3),
             "reference_id": None if primary_ref is None else primary_ref.replace("ref:", ""),
             "buffer": len(buffer),
             "new_examples": added,
             "selfplay_sec": round(sp_time, 1),
+            "train_sec": round(tr_time, 1),
+            # Everything left over is the match games (vs previous best, gauntlet,
+            # AlphaBeta). This is the number the 80/20 learning-vs-measuring target
+            # is judged on — before, it was only ever estimated, never recorded.
+            "eval_sec": round(max(0.0, time.time() - t_iter - sp_time - tr_time), 1),
             "iter_sec": round(time.time() - t_iter, 1),
         }
         metrics.append_metric(cfg, row)
-        print(f"[iter {it:3d}] v{it} elo={cand_elo:.0f} best=v{best_iter}({best_elo:.0f}) "
-              f"loss(p/v/o)={pol_loss:.3f}/{val_loss:.3f}/{own_loss:.3f} vs_rand={wr_random:.2f} "
-              f"vs_AB(5s)={'-' if ab_wr is None else f'{ab_wr:.2f}'} "
-              f"gate={'-' if cand_wr is None else f'{cand_wr:.2f}'}"
-              f"{'' if accepted else ' (rej)'} {row['iter_sec']}s")
+        print(f"[iter {it:3d}] v{it} elo={'-' if cand_elo is None else f'{cand_elo:.0f}'} "
+              f"loss p={pol_loss:.3f}/val {v_pol:.3f} v={val_loss:.3f}/val {v_val:.3f} "
+              f"top1={v_top1:.2f} vsign={v_sign:.2f} "
+              f"vs_prev={'-' if cand_wr is None else f'{cand_wr:.2f}'} "
+              f"vs_AB={'-' if wr_ab_light is None else f'{wr_ab_light:.2f}'} "
+              f"vs_AB5s={'-' if ab_wr is None else f'{ab_wr:.2f}'}"
+              f"{'' if accepted or not (do_eval and cfg.use_gate) else ' (rej)'} "
+              f"{row['iter_sec']}s "
+              f"(sp {row['selfplay_sec']} / tr {row['train_sec']} / ev {row['eval_sec']})")
 
       metrics.write_status(cfg, {"iter": cfg.iterations, "phase": "done"})
     finally:
@@ -449,6 +562,9 @@ def parse_args():
     ap.add_argument("--games", type=int, default=d.games_per_iter, dest="games_per_iter")
     ap.add_argument("--sims", type=int, default=d.num_simulations, dest="num_simulations")
     ap.add_argument("--board", type=int, default=d.board_size, dest="board_size")
+    ap.add_argument("--channels", type=int, default=d.channels)
+    ap.add_argument("--blocks", type=int, default=d.res_blocks, dest="res_blocks")
+    ap.add_argument("--eval-every", type=int, default=d.eval_every, dest="eval_every")
     ap.add_argument("--train-steps", type=int, default=d.train_steps_per_iter,
                     dest="train_steps_per_iter")
     ap.add_argument("--device", default=d.device)
@@ -470,6 +586,8 @@ def parse_args():
                     help="ABLATION: ownership-head loss weight (0.0 disables it)")
     ap.add_argument("--no-tree-reuse", action="store_true",
                     help="ABLATION: disable subtree carry-over in self-play")
+    ap.add_argument("--gate", action="store_true",
+                    help="re-enable the classic accept/revert gate (off by default)")
     return ap.parse_args()
 
 
@@ -477,6 +595,8 @@ def main():
     a = parse_args()
     cfg = Config(iterations=a.iterations, games_per_iter=a.games_per_iter,
                  num_simulations=a.num_simulations, board_size=a.board_size,
+                 channels=a.channels, res_blocks=a.res_blocks,
+                 eval_every=a.eval_every,
                  train_steps_per_iter=a.train_steps_per_iter,
                  device=a.device, seed=a.seed)
     # ablation / experiment overrides
@@ -494,6 +614,8 @@ def main():
         cfg.own_loss_weight = a.own_loss_weight
     if a.no_tree_reuse:
         cfg.tree_reuse = False
+    if a.gate:
+        cfg.use_gate = True
     if a.quick:
         cfg.iterations = min(cfg.iterations, 3)
         cfg.games_per_iter = 4

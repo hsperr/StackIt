@@ -27,6 +27,8 @@ class ResultBook:
         return tuple(sorted((p, q), key=str))
 
     def add_match(self, p, q, wins_p, wins_q, draws):
+        if wins_p + wins_q + draws == 0:
+            return          # a 0-game "match" would still collect prior_draws in the fit
         a, b = self._key(p, q)
         rec = self.d.setdefault((a, b), [0, 0, 0])
         if a == p:
