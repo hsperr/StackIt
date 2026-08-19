@@ -1,0 +1,31 @@
+  loaded 6 file(s), 1,733,889 positions, 0.92 GB resident
+train 1647195 augmented, val 86694
+
+=== arm conv64x4: head=conv 64x4 340k params ===
+  1,647,195 train rows: 1 epoch = 32.2 rounds; max_rounds=800 = 24.9 epochs
+  r  1 lr=1.0e-03 | train loss 2.005 top1 0.3408 | test loss 2.014 top1 0.3400 | gap +0.0008
+  r  2 lr=1.0e-03 | train loss 1.914 top1 0.3621 | test loss 1.923 top1 0.3621 | gap +0.0001
+  r  3 lr=1.0e-03 | train loss 1.854 top1 0.3796 | test loss 1.861 top1 0.3795 | gap +0.0001
+  r 10 lr=1.0e-03 | train loss 1.716 top1 0.4150 | test loss 1.724 top1 0.4134 | gap +0.0016
+  r 20 lr=1.0e-03 | train loss 1.643 top1 0.4372 | test loss 1.655 top1 0.4351 | gap +0.0022
+  r 30 lr=1.0e-03 | train loss 1.592 top1 0.4472 | test loss 1.600 top1 0.4474 | gap -0.0002
+  r 40 lr=1.0e-03 | train loss 1.558 top1 0.4595 | test loss 1.569 top1 0.4576 | gap +0.0019
+  r 50 lr=1.0e-03 | train loss 1.546 top1 0.4619 | test loss 1.559 top1 0.4584 | gap +0.0035
+  r 60 lr=1.0e-03 | train loss 1.535 top1 0.4662 | test loss 1.547 top1 0.4654 | gap +0.0009
+  r 70 lr=1.0e-03 | train loss 1.518 top1 0.4716 | test loss 1.529 top1 0.4691 | gap +0.0025
+  r 80 lr=1.0e-03 | train loss 1.516 top1 0.4712 | test loss 1.530 top1 0.4685 | gap +0.0027
+  r 90 lr=1.0e-03 | train loss 1.506 top1 0.4753 | test loss 1.519 top1 0.4729 | gap +0.0024
+  r100 lr=1.0e-03 | train loss 1.504 top1 0.4758 | test loss 1.518 top1 0.4722 | gap +0.0036
+  r110 lr=1.0e-03 | train loss 1.492 top1 0.4787 | test loss 1.505 top1 0.4754 | gap +0.0032
+  r120 lr=1.0e-03 | train loss 1.485 top1 0.4806 | test loss 1.501 top1 0.4771 | gap +0.0036
+  r130 lr=1.0e-03 | train loss 1.483 top1 0.4820 | test loss 1.495 top1 0.4787 | gap +0.0033
+  r140 lr=1.0e-03 | train loss 1.484 top1 0.4802 | test loss 1.495 top1 0.4772 | gap +0.0030
+  r150 lr=1.0e-03 | train loss 1.482 top1 0.4826 | test loss 1.496 top1 0.4776 | gap +0.0050
+  r160 lr=1.0e-03 | train loss 1.479 top1 0.4830 | test loss 1.489 top1 0.4810 | gap +0.0021
+  r170 lr=1.0e-03 | train loss 1.475 top1 0.4828 | test loss 1.488 top1 0.4801 | gap +0.0027
+  r180 lr=1.0e-03 | train loss 1.471 top1 0.4850 | test loss 1.481 top1 0.4825 | gap +0.0025
+  converged at r189 (no gain for 40 rounds after 0 LR drops)
+=== arm conv64x4: best top-1 0.4841  (2278s) ===
+
+=== summary ===
+  conv64x4         340k params  top-1 0.4841
