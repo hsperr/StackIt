@@ -17,7 +17,7 @@ import torch
 
 from board import Board
 from .config import Config
-from .net import StackNet, Evaluator
+from .net import StackNet, build_net, Evaluator
 from .selfplay import play_game, game_winner
 from .arena_eval import AZPlayer, RandomPlayer, make_alphabeta
 
@@ -30,7 +30,7 @@ def _init_worker():
 
 
 def _build_net(arch, state):
-    net = StackNet(arch["board_size"], arch["channels"], arch["res_blocks"])
+    net = build_net(arch, state)
     net.load_state_dict(state)
     net.eval()
     return net

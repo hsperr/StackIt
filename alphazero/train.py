@@ -30,7 +30,7 @@ import torch
 import torch.nn.functional as F
 
 from .config import Config
-from .net import StackNet, resolve_device
+from .net import StackNet, build_net, resolve_device
 from .replay import ReplayBuffer
 from .selfplay import expand_symmetries
 from .arena_eval import win_rate
@@ -232,7 +232,7 @@ def seed_reference_book(book, registry, ref_ids, cfg, pool, rng):
             book.add_match(ref_ids[i], ref_ids[j], wa, wb, dr)
 
 
-def run(cfg, resume=False, references_dir=None):
+def run(cfg, resume=False, references_dir=None, init_from=None):
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
@@ -244,7 +244,21 @@ def run(cfg, resume=False, references_dir=None):
 
     metrics.ensure_dir(cfg)
 
-    net = StackNet(cfg.board_size, cfg.channels, cfg.res_blocks)
+    net = StackNet(cfg.board_size, cfg.channels, cfg.res_blocks,
+                   cfg.policy_head)
+    # --init-from: start self-play from a net trained elsewhere (e.g. supervised
+    # imitation of AlphaBeta). Weights only -- no version registry, no match
+    # history, no iteration counter -- so this is a fresh run with a warm prior,
+    # which is what --resume is NOT. The architecture comes from the checkpoint
+    # rather than from cfg, because a mismatched head silently fails to load.
+    if init_from:
+        pre = torch.load(init_from, map_location="cpu", weights_only=False)
+        net = build_net(pre["arch"], pre["state"])
+        net.load_state_dict(pre["state"])
+        cfg.channels, cfg.res_blocks = net.arch()["channels"], net.arch()["res_blocks"]
+        cfg.policy_head = net.policy_head
+        print(f"[init] {init_from} -> {cfg.res_blocks}x{cfg.channels} "
+              f"{cfg.policy_head}-head, extra={pre.get('extra', {})}")
     # AdamW, not Adam: Adam folds weight_decay into the gradient, and its per-parameter
     # scaling then decays low-gradient weights far harder than intended. AdamW decouples it.
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
@@ -647,6 +661,10 @@ def parse_args():
     ap.add_argument("--device", default=d.device)
     ap.add_argument("--seed", type=int, default=d.seed)
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--init-from", default=None, dest="init_from",
+                    help="path to a .pt whose weights seed the net. Fresh run "
+                         "(iter 0, empty history), warm prior. Arch is read from "
+                         "the checkpoint. Not compatible with --resume.")
     ap.add_argument("--q-ratio", type=float, default=None, dest="value_q_ratio",
                     help="weight of the search's own value in the value target "
                          "(0 = pure game result, lc0-style blend at ~0.5)")
@@ -717,7 +735,12 @@ def main():
         cfg.ab_bench_think = 0.15
         cfg.ab_bench_games = 2
         cfg.ab_bench_workers = 2
-    run(cfg, resume=a.resume, references_dir=a.references_dir)
+    if a.init_from and a.resume:
+        raise SystemExit("--init-from and --resume are mutually exclusive: one "
+                         "starts a fresh run from given weights, the other "
+                         "continues an old run.")
+    run(cfg, resume=a.resume, references_dir=a.references_dir,
+        init_from=a.init_from)
 
 
 if __name__ == "__main__":

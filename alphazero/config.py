@@ -25,6 +25,9 @@ class Config:
                                  # 64x4 also iterates ~2.3x faster, which matters more while
                                  # the algorithm is still being debugged.
     res_blocks: int = 4          # number of residual blocks
+    policy_head: str = "fc"      # "fc" (AlphaGo-Zero) or "conv" (Leela/KataGo,
+                                 # +1.5pp top-1 vs the AlphaBeta teacher). See
+                                 # alphazero/net.py:StackNet.
 
     # --- MCTS ---
     num_simulations: int = 256   # rollouts (net evals) per move — biggest quality knob. Halved to

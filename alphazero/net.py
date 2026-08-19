@@ -39,9 +39,26 @@ class ResBlock(nn.Module):
 
 
 class StackNet(nn.Module):
-    def __init__(self, board_size, channels=64, res_blocks=4):
+    """`policy_head` picks how the tower's features become 25 move logits.
+
+    "fc" is the AlphaGo-Zero head this project shipped with: squeeze the tower to
+    2 channels, flatten, one Linear to 25. Two problems with it here -- everything
+    the policy knows passes through a 2-channel bottleneck, and the Linear shares
+    no weights between cells, so each square's rule is learned separately.
+
+    "conv" is the Leela/KataGo head: a 3x3 conv at `phead` width, then a 1x1 conv
+    to exactly one logit per cell. Weight-shared across the board, no bottleneck.
+    Measured worth +1.5pp top-1 against the AlphaBeta teacher for 17k parameters,
+    reproduced on both the 268k and the 1.7M dataset. Default stays "fc" so every
+    checkpoint written before 2026-08-20 still loads.
+    """
+
+    def __init__(self, board_size, channels=64, res_blocks=4,
+                 policy_head="fc", phead=32):
         super().__init__()
         self.board_size = board_size
+        self.policy_head = policy_head
+        self.phead = phead
         n_actions = board_size * board_size
 
         self.stem = nn.Sequential(
@@ -52,9 +69,14 @@ class StackNet(nn.Module):
         self.tower = nn.Sequential(*[ResBlock(channels) for _ in range(res_blocks)])
 
         # policy head
-        self.p_conv = nn.Conv2d(channels, 2, 1, bias=False)
-        self.p_bn = nn.BatchNorm2d(2)
-        self.p_fc = nn.Linear(2 * n_actions, n_actions)
+        if policy_head == "conv":
+            self.p_conv = nn.Conv2d(channels, phead, 3, padding=1, bias=False)
+            self.p_bn = nn.BatchNorm2d(phead)
+            self.p_out = nn.Conv2d(phead, 1, 1)
+        else:
+            self.p_conv = nn.Conv2d(channels, 2, 1, bias=False)
+            self.p_bn = nn.BatchNorm2d(2)
+            self.p_fc = nn.Linear(2 * n_actions, n_actions)
 
         # value head
         self.v_conv = nn.Conv2d(channels, 1, 1, bias=False)
@@ -71,7 +93,8 @@ class StackNet(nn.Module):
         h = self.tower(self.stem(x))
 
         p = F.relu(self.p_bn(self.p_conv(h)))
-        p = self.p_fc(p.flatten(1))                       # policy logits
+        p = (self.p_out(p).flatten(1) if self.policy_head == "conv"
+             else self.p_fc(p.flatten(1)))                # policy logits
 
         v = F.relu(self.v_bn(self.v_conv(h)))
         v = F.relu(self.v_fc1(v.flatten(1)))
@@ -85,7 +108,23 @@ class StackNet(nn.Module):
     def arch(self):
         return {"board_size": self.board_size,
                 "channels": self.stem[0].out_channels,
-                "res_blocks": len(self.tower)}
+                "res_blocks": len(self.tower),
+                "policy_head": self.policy_head,
+                "phead": self.phead}
+
+
+def build_net(arch, state=None):
+    """Build a StackNet from an `arch()` dict.
+
+    Checkpoints written before the conv head existed carry no "policy_head" key,
+    so the defaults here keep them loading. Pass `state` for the other case: the
+    supervised bench wrote conv-head weights while `arch()` still had no such
+    field, and only a conv head has a `p_out` layer, whose fan-in is `phead`.
+    """
+    if state is not None and "policy_head" not in arch and "p_out.weight" in state:
+        arch = dict(arch, policy_head="conv", phead=state["p_out.weight"].shape[1])
+    return StackNet(arch["board_size"], arch["channels"], arch["res_blocks"],
+                    arch.get("policy_head", "fc"), arch.get("phead", 32))
 
 
 class Evaluator:
