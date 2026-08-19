@@ -17,13 +17,22 @@ class Config:
                                  # Given room every game ends by domination: median 74, max 364.
 
     # --- network ---
-    channels: int = 64           # filters in the residual tower
-    res_blocks: int = 4          # number of residual blocks
+    channels: int = 96           # filters in the residual tower. Raised 64->96 on
+                                 # 2026-08-19: the v174 net disagreed with ITSELF on
+                                 # 48% of positions when the board was rotated, even
+                                 # though it is trained on all 8 symmetries. Train and
+                                 # held-out loss sat 0.04 apart, so it was underfitting,
+                                 # not overfitting — capacity was the untested lever.
+    res_blocks: int = 5          # number of residual blocks (was 4, same reason)
 
     # --- MCTS ---
-    num_simulations: int = 128   # rollouts (net evals) per move — biggest quality knob. Halved
-                                 # 2026-08-18 to buy games: each game is ~1.6x cheaper, and games
-                                 # (not positions) are what feeds the value head. See games_per_iter.
+    num_simulations: int = 256   # rollouts (net evals) per move — biggest quality knob. Halved to
+                                 # 128 on 2026-08-18 to buy games; doubled back to 256 on
+                                 # 2026-08-19. At gumbel_m=16 the old setting gave only 8 sims per
+                                 # root action, so the search barely improved on the raw policy —
+                                 # and the search IS the training target. Playout Cap
+                                 # Randomization softens the cost: only pcr_prob of moves get the
+                                 # full budget, so the real per-game cost rises ~1.6x, not 2x.
     c_puct: float = 1.5          # exploration constant in PUCT (interior nodes)
     dirichlet_alpha: float = 0.6 # root noise concentration (~10/avg_moves)
     dirichlet_eps: float = 0.30  # root noise weight (classic/time-budget path only)
@@ -68,12 +77,33 @@ class Config:
                                  # over rounds 2-9 of the 2026-08-18 run) because ~9000 training
                                  # rows carried only 70 distinct answers.
     replay_capacity: int = 100_000   # samples kept in the replay buffer (post-augment)
-    train_steps_per_iter: int = 1200  # SGD minibatches per iteration. Raised from 400 at round 34
-                                 # of the 2026-08-18 run: policy CE sat at 2.06 train / 2.09 held-out
-                                 # against a MEASURED target-entropy floor of 0.91 — 1.15 above the
-                                 # floor with a 0.03 generalisation gap, i.e. undertrained, not
-                                 # overfitted. Training was only 3% of the wall clock.
+    train_steps_per_iter: int = 400   # SGD minibatches per iteration. Tried raising 400->1200 at
+                                 # round 34 of the 2026-08-18 run (hypothesis: undertrained, not
+                                 # overfitted — see git history for the reasoning). Result once the
+                                 # buffer refilled cleanly (round 46 on): value gap grew to +0.36
+                                 # (was +0.11), held-out policy loss WORSE (2.21 vs 2.09), top1
+                                 # WORSE (0.29 vs 0.35) — train falls, held-out doesn't: stale/
+                                 # disagreeing targets across buffer generations, not undertraining.
+                                 # Reverted to 400. If retried, fix the buffer instead (KataGo's
+                                 # growing window, or MuZero Reanalyse) rather than more steps.
     batch_size: int = 128
+    value_q_ratio: float = 0.0   # weight of the SEARCH's own value in the value target;
+                                 # 0 = pure game result z (AlphaZero/Leela Zero), 1 = pure
+                                 # search value Q. lc0 calls this q_ratio and trains on a
+                                 # blend. Why: z gives ONE label per game, copied onto every
+                                 # recorded position of that game, so 100k rows carry only
+                                 # ~800 distinct answers and an even position gets stamped
+                                 # with however the game happened to end. Q is the root's
+                                 # own averaged search value, so every position carries its
+                                 # own answer. Keep some z in the mix — it is the only label
+                                 # that is not the net grading its own homework.
+    prefill_frac: float = 0.0    # before the FIRST training step, generate self-play with the
+                                 # loaded champion until the replay buffer is this full
+                                 # (0 = off, 1.0 = full). A resume starts with an EMPTY buffer:
+                                 # the fill_frac ramp below then trains lightly for ~4 rounds on
+                                 # thin data, and every restart costs that. Prefilling pays the
+                                 # self-play cost once, up front, and the first trained round
+                                 # already sees a full, single-generation buffer.
     lr: float = 1e-3             # peak LR; cosine-decayed to lr_min over `iterations`
     lr_min: float = 1e-4
     grad_clip: float = 10.0      # max global grad norm (0 disables). Measured 2026-08-18 on the
@@ -102,14 +132,30 @@ class Config:
     eval_win_threshold: float = 0.55  # promote candidate to "best" at >= this
     benchmark_games: int = 0     # games vs random (0 = off; the net sweeps random from
                                  # iter ~7, so it measures nothing and just costs time)
-    alphabeta_budget: float = 0.3     # seconds/move for the fixed-budget AlphaBeta rating opponent
+    alphabeta_engine: str = "c"       # "c" = the C engine in c_engine/ (~50x the nodes/sec of the
+                                      # Python one, and it has the stand-pat quiescence fix);
+                                      # "python" = the in-process AlphaBeta.
+    alphabeta_budget: float = 0.05    # seconds/move for the fixed-budget AlphaBeta rating opponent.
+                                      # Dropped 0.3->0.05 because the C engine at 0.3s reaches ~9.5
+                                      # ply and would simply shut out a fresh net, which measures
+                                      # nothing. 0.05s is still ~6-7 ply — a real ladder rung.
     ab_elo_games: int = 8        # games vs fixed-budget AlphaBeta each iter (feeds its Elo)
     ab_stop_winrate: float = 0.75  # once the mean winrate over the last `ab_stop_window`
     ab_stop_window: int = 3        # AlphaBeta matches reaches this, stop playing it every
     ab_recheck_every: int = 25     # iteration — it is beaten. Re-play it every Nth iteration
                                    # so its Elo bar stays linked to the current versions.
-    gauntlet_versions: int = 3   # how many past versions the best plays each iter (Elo)
-    gauntlet_games: int = 4      # games vs each sampled past version
+    gauntlet_versions: int = 2   # how many past versions the best plays (Elo connectivity)
+    gauntlet_games: int = 20     # games vs each sampled past version. Was 4, which cannot
+                                 # resolve two nets 3 rounds apart: over 50 rounds the Elo chart
+                                 # drifted DOWN while a 40-game match between v156 and v105 went
+                                 # 28-12 for the newer net. Same total cost, ~5x the resolution.
+    gauntlet_every: int = 5      # run the gauntlet only every Nth EVAL block (so with
+                                 # eval_every=3, every 15 iterations). Rare and big beats
+                                 # frequent and noisy — 4-game samples are pure coin-flip.
+    match_random_plies: int = 3  # uniformly random opening moves in EVERY arena game. Self-play
+                                 # already did this; arena games did not, so the same two nets
+                                 # replayed nearly the same game N times and an "N-game match"
+                                 # carried far less than N games of information.
     elo_prior_draws: float = 2.0  # virtual draws per pair — tames 100%-sweep Elo blow-ups
     elo_anchor: str = "v0"       # Which participant defines the scale. v0 = the initial
     elo_anchor_value: float = 1000.0  # random-weights net, pinned at 1000 — the same
@@ -123,7 +169,10 @@ class Config:
     ab_bench_every: int = 10     # launch the strong-AB benchmark every Nth accepted champion
                                  # (at 5s/move it runs for ~10min; firing it every 5
                                  # iterations kept it permanently resident and stole cores)
-    ab_bench_think: float = 5.0  # seconds/move for BOTH AlphaBeta and the net in this benchmark
+    ab_bench_think: float = 1.0  # seconds/move for BOTH AlphaBeta and the net in this benchmark.
+                                 # 5.0 was chosen to make the SLOW Python engine strong; the C
+                                 # engine at 1.0s already searches deeper than Python did at 5.0s,
+                                 # so this is a harder opponent that costs a fifth of the clock.
     ab_bench_games: int = 8      # games per background benchmark
     ab_bench_workers: int = 2    # CPU processes for it (leave cores for training)
     ab_bench_file: str = "checkpoints/ab_bench.jsonl"

@@ -19,7 +19,7 @@ from board import Board
 from .config import Config
 from .net import StackNet, Evaluator
 from .selfplay import play_game, game_winner
-from .arena_eval import AZPlayer, RandomPlayer, AlphaBetaPlayer
+from .arena_eval import AZPlayer, RandomPlayer, make_alphabeta
 
 _CTX = get_context("spawn")
 _CPU = torch.device("cpu")
@@ -107,7 +107,7 @@ def _match_chunk(payload):
             return AZPlayer(b_ev, cfg)
         if opp[0] == "random":
             return RandomPlayer()
-        return AlphaBetaPlayer(opp[1])              # ("alphabeta", budget)
+        return make_alphabeta(cfg, opp[1])          # ("alphabeta", budget)
 
     out = []
     for first_is_a, seed in specs:
@@ -117,6 +117,14 @@ def _match_chunk(payload):
         p1, p2 = (pa, pb) if first_is_a else (pb, pa)
         players = {1: p1, 2: p2}
         board = Board(board_size, board_size)
+        # Random opening plies, same reason as in arena_eval.play_match: without
+        # them two strong players replay nearly the same game every time and an
+        # N-game match is worth far less than N games.
+        for _ in range(getattr(cfg, "match_random_plies", 0)):
+            legal = board.possible_moves()
+            if not legal:
+                break
+            board.move(*legal[rng.integers(len(legal))])
         for _ in range(max_plies):
             if board.winning_player() or not board.possible_moves():
                 break

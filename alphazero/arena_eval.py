@@ -5,6 +5,10 @@ top-level arena.py, which exists to load *different* code versions at once).
 Players expose `move(board, rng) -> (x, y)`. Colors alternate across games so
 first-player advantage cancels out.
 """
+import json
+import os
+import subprocess
+
 import numpy as np
 
 from board import Board
@@ -43,6 +47,66 @@ class AZPlayer:
         return index_to_move(root.selected_action, board.size_x)
 
 
+class CAlphaBetaPlayer:
+    """AlphaBeta played by the C engine in `c_engine/` instead of `alphabeta.py`.
+
+    Same algorithm, ~50x the nodes/sec, so at equal wall-clock it searches about
+    4 ply deeper. The binary is spoken to over a line protocol on a long-lived
+    subprocess (one per worker process, reused across games) — spawning per move
+    would cost more than the search at small budgets.
+
+    Request : "<sx> <sy> <side> <secs> <max_depth> <v:o> <v:o> ..." (cells in
+              ascending index order, index = y*sx + x)
+    Response: one JSON line, {"move": [x, y] | null, ...}
+    """
+
+    _shared = {}          # binary path -> Popen, one per worker process
+
+    def __init__(self, budget=0.05, binary=None, max_depth=40):
+        self.budget = budget
+        self.max_depth = max_depth
+        self.binary = binary or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "c_engine", "stackit")
+
+    def reset(self):
+        pass
+
+    def _proc(self):
+        pr = CAlphaBetaPlayer._shared.get(self.binary)
+        if pr is None or pr.poll() is not None:
+            pr = subprocess.Popen([self.binary, "--serve"],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  text=True, bufsize=1)
+            CAlphaBetaPlayer._shared[self.binary] = pr
+        return pr
+
+    def move(self, board, rng):
+        sx, sy = board.size_x, board.size_y
+        cells = " ".join(f"{board.board[y][x]}:{board.player[y][x]}"
+                         for y in range(sy) for x in range(sx))
+        req = f"{sx} {sy} {board.current_player} {self.budget} {self.max_depth} {cells}\n"
+        pr = self._proc()
+        pr.stdin.write(req)
+        pr.stdin.flush()
+        line = pr.stdout.readline()
+        if not line:                                  # engine died — do not fail the match
+            raise RuntimeError(f"C AlphaBeta engine died ({self.binary})")
+        mv = json.loads(line).get("move")
+        return tuple(mv) if mv else None
+
+
+def make_alphabeta(cfg, budget):
+    """The fixed-budget AlphaBeta opponent, C or Python per `cfg.alphabeta_engine`.
+    Falls back to Python (loudly) if the C binary has not been built."""
+    if getattr(cfg, "alphabeta_engine", "python") == "c":
+        p = CAlphaBetaPlayer(budget)
+        if os.path.exists(p.binary):
+            return p
+        print(f"[arena] C engine not built at {p.binary} — using the Python AlphaBeta")
+    return AlphaBetaPlayer(budget)
+
+
 class RandomPlayer:
     def reset(self):
         pass
@@ -68,7 +132,8 @@ class AlphaBetaPlayer:
         return mv
 
 
-def play_match(player_a, player_b, n_games, board_size, max_plies, rng):
+def play_match(player_a, player_b, n_games, board_size, max_plies, rng,
+               opening_random_plies=0):
     """Return (wins_a, wins_b, draws). Colors swap every game."""
     wa = wb = draws = 0
     for g in range(n_games):
@@ -77,6 +142,14 @@ def play_match(player_a, player_b, n_games, board_size, max_plies, rng):
         player_a.reset(); player_b.reset()
         board = Board(board_size, board_size)
         players = {1: p1, 2: p2}
+        # Random opening plies: without them two strong nets replay nearly the
+        # same game every time, so an N-game match carries far less than N games
+        # of information. Self-play has always done this; the arena had not.
+        for _ in range(opening_random_plies):
+            legal = board.possible_moves()
+            if not legal:
+                break
+            board.move(*legal[rng.integers(len(legal))])
         for _ in range(max_plies):
             if board.winning_player() or not board.possible_moves():
                 break

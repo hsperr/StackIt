@@ -95,10 +95,16 @@ class Evaluator:
     def __init__(self, net, device):
         self.net = net
         self.device = device
+        # Once, here — NOT per inference. `Module.eval()` walks every submodule
+        # and writes its `training` flag, which a profile of one self-play game
+        # showed costing 509,507 __setattr__ calls and 1.9s of 14.9s (13% of the
+        # whole game) for a flag that never changed. Every net handed to an
+        # Evaluator is already in eval mode (_build_net and load_net both do it);
+        # this line only guarantees it.
+        self.net.eval()
 
     @torch.no_grad()
     def infer(self, board):
-        self.net.eval()
         planes = encode(board)
         x = torch.from_numpy(planes).unsqueeze(0).to(self.device)
         logits, value, _ = self.net(x)                    # ownership head unused at inference
@@ -117,7 +123,6 @@ class Evaluator:
     @torch.no_grad()
     def infer_batch(self, boards):
         """Batched version for many leaf boards at once (used by parallel eval)."""
-        self.net.eval()
         x = torch.from_numpy(np.stack([encode(b) for b in boards])).to(self.device)
         logits, values, _ = self.net(x)                   # ownership head unused at inference
         logits = logits.float().cpu().numpy()
