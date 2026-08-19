@@ -301,8 +301,118 @@ int board_winner(const Board *b) {
     return 0;
 }
 
+/* --- evaluation variants ------------------------------------------------
+ * Selected at compile time with -DEVAL_VARIANT=n so every candidate is the
+ * same engine with one thing changed. 0 is the shipped behaviour.
+ *
+ *   0  chips        boxes[me] - boxes[them]        (what we shipped before)
+ *   1  territory    W_CELL*(cells) + chips
+ *   2  territory + threat, two passes
+ *   3  chips + threat
+ *   4  DEFAULT — same score as 2, one pass (verified bit-identical over 162
+ *      positions: same move, same score, same node count)
+ *
+ * Round robin, 40 games/pair, random 3-ply openings, 2026-08-19:
+ *   fixed depth 5   e2 84%  |  e0 54%  |  e1 48%  |  e3 14%   (e2 beats e0 32-8)
+ *   0.05s/move      e4 beats e0 38-22 = 63% +/- 6%
+ *   0.30s/move      e4 beats e0 21-9  = 70% +/- 8%
+ * Neither half works alone: territory-only and threat-only are both WORSE than
+ * plain chips. Only the combination wins.
+ * Node rate: e0 4.16 / e2 2.46 / e4 3.06 Mnodes/s — the single pass buys back
+ * half of what the smarter eval costs, and the edge grows with time control.
+ * Weights: W_CELL=10, W_THREAT=3 beat cell=5 (52%), cell=20 (47%), threat=6 (42%).
+ *
+ * "threat": a cell holding 4 chips explodes the next time its owner plays it,
+ * and the explosion CLAIMS all four orthogonal neighbours whatever they hold.
+ * The opponent can never play on a cell you own, so the only way your stack
+ * changes hands is an adjacent enemy explosion. So the enemy chips sitting next
+ * to my primed cell are chips I am about to win, and my chips sitting next to
+ * an enemy primed cell are chips I am about to lose.
+ *
+ * Mate is +/-1000000 and the biggest board term here is well under 1000, so
+ * these stay clear of the mate window.
+ */
+#ifndef EVAL_VARIANT
+#define EVAL_VARIANT 4
+#endif
+
+#define PRIMED 4          /* a cell explodes at >= 5 */
+#ifndef W_CELL
+#define W_CELL 10         /* weight on owning a cell (the actual win condition) */
+#endif
+#ifndef W_THREAT
+#define W_THREAT 3        /* weight on chips about to change hands */
+#endif
+
+#if EVAL_VARIANT == 4
+/* Same score as variant 2, one pass instead of two. Most cells fail the
+ * `val < PRIMED` test immediately, so the four neighbour reads only happen on
+ * the handful of cells that are actually about to explode. board_eval runs at
+ * every leaf, so halving it buys back search depth. */
+static void threat_both(const Board *b, int cur, int *mine, int *theirs) {
+    int sx = b->sx, sy = b->sy;
+    int m = 0, t = 0;
+    for (int y = 0; y < sy; y++) {
+        for (int x = 0; x < sx; x++) {
+            int i = y * sx + x;
+            if (b->val[i] < PRIMED) continue;
+            int o = b->own[i];
+            if (!o) continue;
+            int victim = 3 - o;
+            int s = 0;
+            if (y + 1 < sy && b->own[i + sx] == victim) s += b->val[i + sx];
+            if (y - 1 >= 0  && b->own[i - sx] == victim) s += b->val[i - sx];
+            if (x + 1 < sx && b->own[i + 1]  == victim) s += b->val[i + 1];
+            if (x - 1 >= 0  && b->own[i - 1]  == victim) s += b->val[i - 1];
+            if (o == cur) m += s; else t += s;
+        }
+    }
+    *mine = m; *theirs = t;
+}
+#endif
+
+#if EVAL_VARIANT == 2 || EVAL_VARIANT == 3
+/* Chips owned by `victim` that sit orthogonally next to a primed cell of
+ * `attacker`. O(cells); called at every leaf, so it stays branch-simple. */
+static int threat_chips(const Board *b, int attacker, int victim) {
+    int sx = b->sx, sy = b->sy, total = 0;
+    for (int y = 0; y < sy; y++) {
+        for (int x = 0; x < sx; x++) {
+            int i = y * sx + x;
+            if (b->own[i] != attacker || b->val[i] < PRIMED) continue;
+            if (y + 1 < sy && b->own[i + sx] == victim) total += b->val[i + sx];
+            if (y - 1 >= 0  && b->own[i - sx] == victim) total += b->val[i - sx];
+            if (x + 1 < sx && b->own[i + 1]  == victim) total += b->val[i + 1];
+            if (x - 1 >= 0  && b->own[i - 1]  == victim) total += b->val[i - 1];
+        }
+    }
+    return total;
+}
+#endif
+
 int board_eval(const Board *b) {
     int cur = b->current;
     int other = 3 - cur;
-    return b->boxes[cur] - b->boxes[other];
+    int chips = b->boxes[cur] - b->boxes[other];
+
+#if EVAL_VARIANT == 0
+    return chips;
+#elif EVAL_VARIANT == 1
+    return W_CELL * (b->owned[cur] - b->owned[other]) + chips;
+#elif EVAL_VARIANT == 2
+    return W_CELL * (b->owned[cur] - b->owned[other]) + chips
+         + W_THREAT * (threat_chips(b, cur, other) - threat_chips(b, other, cur));
+#elif EVAL_VARIANT == 3
+    return chips
+         + W_THREAT * (threat_chips(b, cur, other) - threat_chips(b, other, cur));
+#elif EVAL_VARIANT == 4
+    {
+        int mine, theirs;
+        threat_both(b, cur, &mine, &theirs);
+        return W_CELL * (b->owned[cur] - b->owned[other]) + chips
+             + W_THREAT * (mine - theirs);
+    }
+#else
+#error "unknown EVAL_VARIANT"
+#endif
 }
