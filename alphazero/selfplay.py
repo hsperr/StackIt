@@ -15,8 +15,8 @@ Two efficiency devices from KataGo / Gumbel AlphaZero are used here:
 
 Each ply plays the Gumbel search's *selected action* (the Sequential-Halving
 survivor), while recording the completed policy as the training target. Root
-Gumbel noise is the exploration device: on for the first `temp_moves` plies (so
-the selected action varies), off afterwards (greedy).
+Gumbel noise is the exploration device and is on for EVERY ply, which is what
+mctx does during training (`gumbel_noise_plies = 0`).
 """
 from dataclasses import replace
 
@@ -108,10 +108,18 @@ def play_game(evaluator, cfg, rng, opponent_ev=None):
         else:
             budget = cfg.num_simulations
         r = reuse if (pure_selfplay and cfg.tree_reuse) else None
-        # Gumbel noise IS the exploration device: on it for the first temp_moves
-        # plies (varied selected action), off after (greedy). It replaces the old
-        # tau=1 completed-policy sampling.
-        explore = ply < cfg.temp_moves
+        # Gumbel noise IS the exploration device. mctx keeps it on for every
+        # training move (gumbel_scale=1.0; only evaluation sets it to 0), so
+        # `gumbel_noise_plies = 0` means "every ply" and matches the reference.
+        # Capping it at temp_moves was ours, and it cost us: past ply 16 self-play
+        # was fully deterministic, so every recorded position came from the net's
+        # own greedy line and it never saw the moves it already dislikes — the
+        # narrow-policy trap feeding itself.
+        if getattr(cfg, "self_play_gumbel", True):
+            npl = getattr(cfg, "gumbel_noise_plies", 0)
+            explore = npl <= 0 or ply < npl
+        else:
+            explore = ply < cfg.temp_moves       # tau=1 ablation keeps the old rule
         pi, root = (mcts if is_main else mcts_opp).search(
             board, add_noise=explore, max_sims=budget, reuse_root=r)
         if pi.sum() == 0:

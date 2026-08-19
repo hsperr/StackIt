@@ -17,13 +17,14 @@ class Config:
                                  # Given room every game ends by domination: median 74, max 364.
 
     # --- network ---
-    channels: int = 96           # filters in the residual tower. Raised 64->96 on
-                                 # 2026-08-19: the v174 net disagreed with ITSELF on
-                                 # 48% of positions when the board was rotated, even
-                                 # though it is trained on all 8 symmetries. Train and
-                                 # held-out loss sat 0.04 apart, so it was underfitting,
-                                 # not overfitting — capacity was the untested lever.
-    res_blocks: int = 5          # number of residual blocks (was 4, same reason)
+    channels: int = 64           # filters in the residual tower. Went 64->96 on 2026-08-19
+                                 # (the net disagreed with ITSELF on 48% of rotated positions
+                                 # despite 8-fold augmentation) and back to 64 later the same
+                                 # day: that arm was stopped at v30, and the diagnosis moved
+                                 # from capacity to self-play COVERAGE — see gumbel_noise_plies.
+                                 # 64x4 also iterates ~2.3x faster, which matters more while
+                                 # the algorithm is still being debugged.
+    res_blocks: int = 4          # number of residual blocks
 
     # --- MCTS ---
     num_simulations: int = 256   # rollouts (net evals) per move — biggest quality knob. Halved to
@@ -50,7 +51,17 @@ class Config:
                                  # applied to Q rescaled to [0,1] — see mcts_az._sigma.
                                  # 1.0 on raw Q made targets near-one-hot noise.)
     self_play_gumbel: bool = True  # ABLATION: False -> classic PUCT visit-count target +
-                                   # tau=1 sampling (the pre-Gumbel algorithm that converged)
+                                   # tau=1 sampling (the pre-Gumbel algorithm that converged).
+                                   # Verified 2026-08-19 against DeepMind's mctx: the completed
+                                   # policy IS the documented training target ("action_weights
+                                   # contain targets usable to train the policy probabilities"),
+                                   # and it is MEANT to be sharper than visit counts. Do not
+                                   # "fix" that by reverting to visit counts.
+    gumbel_noise_plies: int = 0  # plies of root Gumbel noise in self-play; 0 = every ply, which
+                                 # is what mctx does (gumbel_scale=1.0 throughout training, 0
+                                 # only for evaluation). Was capped at temp_moves=16, so from
+                                 # ply 16 on self-play was deterministic and every recorded
+                                 # position sat on the net's own greedy line.
 
     # --- Playout Cap Randomization (KataGo) ---
     # Most self-play moves get a cheap search and are NOT recorded; a fraction
@@ -87,7 +98,7 @@ class Config:
                                  # Reverted to 400. If retried, fix the buffer instead (KataGo's
                                  # growing window, or MuZero Reanalyse) rather than more steps.
     batch_size: int = 128
-    value_q_ratio: float = 0.0   # weight of the SEARCH's own value in the value target;
+    value_q_ratio: float = 0.5   # weight of the SEARCH's own value in the value target;
                                  # 0 = pure game result z (AlphaZero/Leela Zero), 1 = pure
                                  # search value Q. lc0 calls this q_ratio and trains on a
                                  # blend. Why: z gives ONE label per game, copied onto every
