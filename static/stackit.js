@@ -12,6 +12,9 @@
 var FRAME_MS = 110;          // pause between cascade frames
 var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+var POLL_MS = 1000;          // how often an online browser asks for news
+var POLL_HIDDEN_MS = 4000;   // ... and how often when the tab is in the background
+
 var S = {                    // client state
     iid: null,
     state: null,
@@ -19,8 +22,12 @@ var S = {                    // client state
     net: null,
     setup: { mode: "hva", ai: "alphabeta", seat: 1 },
     engines: [],
+    limits: { max_board: 8, max_board_humans: 12, max_players: 5 },
     busy: false,
-    heat: true
+    heat: true,
+    token: null,             // proves which seat is ours in an online game
+    drawn: 0,                // moves already painted, so polling knows what it missed
+    pollTimer: null
 };
 
 var $ = function (id) { return document.getElementById(id); };
@@ -64,10 +71,25 @@ function paintSetup() {
     document.querySelectorAll("#engine-choice .choice").forEach(function (b) {
         b.classList.toggle("on", b.dataset.engine === S.setup.ai);
     });
-    var vsAI = S.setup.mode === "hva";
+    var mode = S.setup.mode, vsAI = mode === "hva";
     $("opponent-field").hidden = !vsAI;
     $("seat-field").hidden = !vsAI;
     $("time-field").hidden = !vsAI;
+    $("players-field").hidden = vsAI;
+    $("name-field").hidden = mode !== "online";
+    $("btn-start").textContent = mode === "online" ? "Create the game" : "Start game";
+    applySizeCap();
+}
+
+/** Only an engine has to search the board, so a humans-only game is allowed a
+ *  bigger one. Keep the form honest about which cap is in force. */
+function applySizeCap() {
+    var cap = S.setup.mode === "hva" ? S.limits.max_board : S.limits.max_board_humans;
+    var size = $("in-size");
+    size.max = cap;
+    if (+size.value > cap) size.value = cap;
+    $("size-hint").textContent = size.value + " by " + size.value + " grid, up to "
+                               + cap + " by " + cap + ".";
 }
 
 function renderEngines(list) {
@@ -102,7 +124,7 @@ function renderEngines(list) {
 
 function refreshEngines() {
     var size = parseInt($("in-size").value, 10) || 5;
-    $("size-hint").textContent = size + " by " + size + " grid.";
+    applySizeCap();
     return api("/api/engines?size=" + size)
         .then(function (j) {
             applyLimits(j.limits);
@@ -115,20 +137,30 @@ function refreshEngines() {
  *  so nobody picks a number that is silently clamped on submit. */
 function applyLimits(lim) {
     if (!lim) return;
-    var size = $("in-size"), time = $("in-time");
-    size.max = lim.max_board;
+    S.limits = lim;
+    var time = $("in-time"), players = $("in-players");
     time.max = lim.max_thinking_time;
-    if (+size.value > lim.max_board) {
-        size.value = lim.max_board;
-        $("size-hint").textContent = size.value + " by " + size.value + " grid.";
-    }
+    players.max = lim.max_players;
+    if (+players.value > lim.max_players) players.value = lim.max_players;
     if (+time.value > lim.max_thinking_time) time.value = lim.max_thinking_time;
     $("time-hint").textContent =
         "Seconds per computer move, up to " + lim.max_thinking_time +
         ". More time, stronger play.";
+    applySizeCap();
 }
 
 /* ---------------------------------------------------------------- board -- */
+
+/** Cells are a fixed 62px up to a 7-wide board; wider than that they shrink
+ *  so a 12x12 grid still fits a laptop screen and a phone. */
+function fitBoard() {
+    var st = S.state;
+    if (!st) return;
+    var g = $("board-grid");
+    var gap = 9, room = Math.min(window.innerWidth - 44, 760);
+    var size = Math.floor((room - (st.size_x - 1) * gap) / st.size_x);
+    g.style.setProperty("--cell", Math.max(26, Math.min(62, size)) + "px");
+}
 
 function buildBoard(st) {
     var g = $("board-grid");
@@ -194,19 +226,33 @@ function animate(frames, origin, sizeX) {
     }, Promise.resolve());
 }
 
+/** Whether the person at this browser may move right now. On one screen that
+ *  is anyone whose turn it is; online it is only our own seat. */
+function myTurn(st) {
+    if (!st || st.over) return false;
+    if (st.mode === "hva") return st.current_player !== st.ai_seat;
+    if (st.mode === "online") return st.started && st.your_seat === st.current_player;
+    return true;
+}
+
 function onCellClick() {
     if (S.busy || !S.state) return;
     var st = S.state;
     if (st.over) return;
-    if (st.mode === "hva" && st.current_player === st.ai_seat) return;
+    if (!myTurn(st)) {
+        if (st.mode === "online") toast("Not your turn yet.");
+        return;
+    }
     var x = parseInt(this.dataset.x, 10), y = parseInt(this.dataset.y, 10);
     var legal = st.legal.some(function (m) { return m[0] === x && m[1] === y; });
-    if (!legal) { toast("That cell belongs to the other player."); return; }
+    if (!legal) { toast("That cell belongs to somebody else."); return; }
 
     setBusy(true);
-    api("/api/game/" + S.iid + "/move", { method: "POST", body: { x: x, y: y } })
+    api("/api/game/" + S.iid + "/move",
+        { method: "POST", body: { x: x, y: y, token: S.token } })
         .then(function (j) {
             return animate(j.frames, [x, y], j.state.size_x).then(function () {
+                S.drawn = j.state.move_count;
                 applyState(j.state);
                 return maybeAIMove();
             });
@@ -237,10 +283,57 @@ function maybeAIMove() {
 
 /* --------------------------------------------------------------- render -- */
 
+/** One card per seat. Rebuilt only when the line-up changes, so a poll that
+ *  brings nothing new does not make the scoreboard flicker. */
+function renderScoreboard(st) {
+    var wrap = $("scoreboard");
+    var sig = st.players.map(function (p) { return p.seat + ":" + p.name; }).join("|");
+    if (wrap.dataset.sig !== sig) {
+        wrap.dataset.sig = sig;
+        wrap.classList.toggle("many", st.players.length > 2);
+        wrap.innerHTML = "";
+        st.players.forEach(function (p) {
+            var card = document.createElement("div");
+            card.className = "pcard";
+            card.id = "pcard-" + p.seat;
+            card.dataset.p = p.seat;
+            card.innerHTML = '<span class="dot"></span><span class="meta">' +
+                '<span class="name"></span><span class="sub"></span></span>' +
+                '<span class="thinking-badge">thinking' +
+                '<span class="dots"><i></i><i></i><i></i></span></span>';
+            wrap.appendChild(card);
+        });
+    }
+    st.players.forEach(function (p) {
+        var card = $("pcard-" + p.seat);
+        card.querySelector(".name").textContent = p.name;
+        card.querySelector(".sub").textContent = !p.joined
+            ? "not here yet"
+            : p.out ? "knocked out"
+            : plural(p.cells, "cell") + " · " + plural(p.blocks, "block");
+        card.classList.toggle("active", !st.over && st.current_player === p.seat);
+        card.classList.toggle("out", !!p.out);
+        card.classList.toggle("empty", !p.joined);
+        card.classList.toggle("you", !!p.is_you);
+    });
+}
+
+function whoSpan(st, seat) {
+    var p = st.players[seat - 1];
+    return '<span class="who-' + seat + '">' +
+           (p ? p.name : "Player " + seat) + "</span>";
+}
+
 function applyState(st) {
-    var rebuild = !S.state || S.state.size_x !== st.size_x || S.state.size_y !== st.size_y;
+    // Also rebuild when the grid is empty: an online game keeps polling state
+    // while it sits in the lobby, so by the time the game screen appears the
+    // sizes already match and only the missing cells give it away.
+    var grid = $("board-grid");
+    var rebuild = !S.state || S.state.size_x !== st.size_x
+               || S.state.size_y !== st.size_y
+               || grid.childElementCount !== st.size_x * st.size_y;
     S.state = st;
-    if (rebuild) buildBoard(st);
+    if (rebuild) { buildBoard(st); fitBoard(); }
     paintCells(st.cells, st.size_x);
 
     // last-move marker
@@ -252,8 +345,8 @@ function applyState(st) {
         if (lm) lm.classList.add("lastmove");
     }
 
-    // which cells the human may click right now
-    var humansTurn = !st.over && (st.mode === "hvh" || st.current_player !== st.ai_seat);
+    // which cells the person at this browser may click right now
+    var humansTurn = myTurn(st);
     var legal = {};
     st.legal.forEach(function (m) { legal[m[0] + "-" + m[1]] = true; });
     document.querySelectorAll(".cell").forEach(function (c) {
@@ -261,24 +354,18 @@ function applyState(st) {
         c.classList.toggle("playable", !!ok);
     });
 
-    // scoreboard
-    [1, 2].forEach(function (p) {
-        var cells = st.cell_count[String(p)], blocks = st.blocks[String(p)];
-        $("name-" + p).textContent = st.labels[String(p)];
-        $("sub-" + p).textContent = plural(cells, "cell") + " · " + plural(blocks, "block");
-        $("pcard-" + p).classList.toggle("active", !st.over && st.current_player === p);
-    });
+    renderScoreboard(st);
 
     // turn line
     var turn = $("turn-text");
     if (st.over) {
         turn.textContent = "Game over.";
-    } else if (st.mode === "hvh") {
-        turn.textContent = st.labels[String(st.current_player)] + " to move.";
-    } else if (st.current_player === st.ai_seat) {
+    } else if (st.mode === "hva" && st.current_player === st.ai_seat) {
         turn.textContent = st.ai_name + " is choosing a move…";
-    } else {
+    } else if (myTurn(st)) {
         turn.textContent = "Your turn. Click a grey cell or one of your own.";
+    } else {
+        turn.innerHTML = whoSpan(st, st.current_player) + " to move.";
     }
     // S.busy still wins: a repaint mid-turn must not re-enable the buttons.
     $("btn-undo").disabled = S.busy || !st.can_undo || st.over;
@@ -286,13 +373,15 @@ function applyState(st) {
     // win overlay
     var ov = $("win-overlay");
     if (st.over) {
-        var msg;
+        var msg, winner = st.players[st.winner - 1];
         if (!st.winner) {
             msg = "It is a draw.";
-        } else if (st.mode === "hvh") {
-            msg = st.labels[String(st.winner)] + " wins!";
-        } else {
+        } else if (st.mode === "hva") {
             msg = st.winner === st.human_seat ? "You win!" : st.ai_name + " wins.";
+        } else if (st.mode === "online" && st.winner === st.your_seat) {
+            msg = "You win!";
+        } else {
+            msg = (winner ? winner.name : "Player " + st.winner) + " wins!";
         }
         $("win-msg").textContent = msg;
         ov.classList.add("show");
@@ -313,8 +402,9 @@ function setBusy(on) {
 }
 
 function setThinking(on) {
-    if (!S.state) return;
-    $("pcard-" + S.state.ai_seat).classList.toggle("thinking", on);
+    if (!S.state || S.state.mode !== "hva") return;
+    var card = $("pcard-" + S.state.ai_seat);
+    if (card) card.classList.toggle("thinking", on);
     if (on) {
         $("eval-cap").textContent = "thinking…";
         $("an-when").textContent = "";
@@ -491,32 +581,54 @@ function renderLadder(a) {
 
 /* ------------------------------------------------------------- controls -- */
 
+function showScreen(name) {
+    $("setup").hidden = name !== "setup";
+    $("lobby").hidden = name !== "lobby";
+    $("game").hidden = name !== "game";
+}
+
+function enterGameScreen(st) {
+    showScreen("game");
+    S.analysis = null;
+    ["pv-block", "cand-block", "net-block", "ladder-block"].forEach(function (id) {
+        $(id).hidden = true;
+    });
+    $("eval-num").textContent = "—";
+    $("eval-cap").textContent = "no moves yet";
+    $("eval-fill").style.width = "0";
+    $("an-stats").innerHTML = "";
+    $("an-engine").textContent = st.ai_name;
+    $("an-when").textContent = "";
+    applyState(st);
+}
+
 function startGame() {
+    var mode = S.setup.mode;
     var body = {
         size: parseInt($("in-size").value, 10) || 5,
-        mode: S.setup.mode,
+        mode: mode,
         ai: S.setup.ai,
         human_seat: S.setup.seat,
-        thinking_time: parseInt($("in-time").value, 10) || 3
+        players: parseInt($("in-players").value, 10) || 2,
+        thinking_time: parseInt($("in-time").value, 10) || 3,
+        name: $("in-name").value
     };
     $("setup-error").textContent = "";
     $("btn-start").disabled = true;
     api("/api/game", { method: "POST", body: body })
         .then(function (j) {
             S.iid = j.state.iid;
-            S.analysis = null;
-            $("setup").hidden = true;
-            $("game").hidden = false;
-            ["pv-block", "cand-block", "net-block", "ladder-block"].forEach(function (id) {
-                $(id).hidden = true;
-            });
-            $("eval-num").textContent = "—";
-            $("eval-cap").textContent = "no moves yet";
-            $("eval-fill").style.width = "0";
-            $("an-stats").innerHTML = "";
-            $("an-engine").textContent = j.state.ai_name;
-            $("an-when").textContent = "";
-            applyState(j.state);
+            S.token = j.token || null;
+            S.drawn = 0;
+            if (mode === "online") {
+                S.state = j.state;
+                rememberSeat();
+                renderLobby(j.state);
+                showScreen("lobby");
+                startPolling();
+                return;
+            }
+            enterGameScreen(j.state);
             setBusy(true);
             return maybeAIMove().then(function () { setBusy(false); });
         })
@@ -525,9 +637,165 @@ function startGame() {
 }
 
 function showSetup() {
-    $("game").hidden = true;
-    $("setup").hidden = false;
+    stopPolling();
+    forgetSeat();
+    S.iid = null;
+    S.token = null;
+    S.state = null;
+    S.drawn = 0;
+    showScreen("setup");
     refreshEngines();
+}
+
+/* --------------------------------------------------------------- online -- */
+
+/* A seat belongs to whoever holds its token, and the token only lives in this
+   browser. Park it so a refresh, a stray back button or a phone locking itself
+   does not lose the seat. Private browsing may refuse the write; that is fine,
+   it only costs the resume. */
+var SEAT_KEY = "stackit.seat";
+
+function rememberSeat() {
+    try {
+        localStorage.setItem(SEAT_KEY, JSON.stringify({ iid: S.iid, token: S.token }));
+    } catch (e) { /* storage disabled — nothing to resume from, no harm done */ }
+}
+
+function forgetSeat() {
+    try { localStorage.removeItem(SEAT_KEY); } catch (e) { /* as above */ }
+}
+
+/** Walk back into the game this browser was in, if it is still going. */
+function resumeSeat() {
+    var saved = null;
+    try { saved = JSON.parse(localStorage.getItem(SEAT_KEY)); } catch (e) { return; }
+    if (!saved || !saved.iid || !saved.token) return;
+    api("/api/game/" + saved.iid + "?token=" + encodeURIComponent(saved.token))
+        .then(function (j) {
+            // The seat is gone if the game expired, ended, or never knew us.
+            if (j.state.your_seat === null || j.state.over) { forgetSeat(); return; }
+            S.iid = saved.iid;
+            S.token = saved.token;
+            S.drawn = j.state.move_count;
+            S.state = j.state;
+            if (j.state.started) enterGameScreen(j.state);
+            else { renderLobby(j.state); showScreen("lobby"); }
+            startPolling();
+        })
+        .catch(forgetSeat);
+}
+
+function shareLink(code) {
+    return location.origin + location.pathname + "?join=" + code;
+}
+
+function renderLobby(st) {
+    $("lobby-code").textContent = st.code || "—";
+    var wrap = $("lobby-seats");
+    wrap.innerHTML = "";
+    st.players.forEach(function (p) {
+        var row = document.createElement("div");
+        row.className = "lobby-seat" + (p.joined ? "" : " empty");
+        row.innerHTML = '<span class="swatch p' + p.seat + '"></span><span class="who"></span>';
+        row.querySelector(".who").textContent = p.joined ? p.name : "waiting…";
+        wrap.appendChild(row);
+    });
+    var missing = st.num_players - st.seats_taken;
+    $("lobby-waiting").innerHTML = missing > 0
+        ? "Waiting for " + plural(missing, "more player") +
+          '<span class="dots"><i></i><i></i><i></i></span>'
+        : "Everyone is here.";
+    // Only the host may cut the wait short, and only with somebody to play.
+    $("btn-start-now").hidden = !(st.is_host && st.seats_taken >= 2 && missing > 0);
+}
+
+function joinGame() {
+    var code = ($("in-code").value || "").trim().toUpperCase();
+    if (code.length !== 4) {
+        $("join-error").textContent = "The code is four letters.";
+        return;
+    }
+    $("join-error").textContent = "";
+    $("btn-join").disabled = true;
+    api("/api/join", { method: "POST",
+                       body: { code: code, name: $("in-join-name").value } })
+        .then(function (j) {
+            S.iid = j.state.iid;
+            S.token = j.token;
+            S.drawn = 0;
+            S.state = j.state;
+            rememberSeat();
+            // Drop the ?join= from the address bar. It has done its job, and
+            // leaving it there would make a refresh try to join again — with a
+            // seat we already hold, in a game that has already started.
+            try { history.replaceState(null, "", location.pathname); } catch (e) {}
+            if (j.state.started) {
+                enterGameScreen(j.state);
+            } else {
+                renderLobby(j.state);
+                showScreen("lobby");
+            }
+            startPolling();
+        })
+        .catch(function (e) { $("join-error").textContent = e.message; })
+        .then(function () { $("btn-join").disabled = false; });
+}
+
+/* Polling, not sockets: a friendly game makes a move every few seconds, so one
+   small request per second per browser is plenty and needs no extra plumbing
+   on the server. */
+function startPolling() {
+    stopPolling();
+    S.pollTimer = setTimeout(pollTick, document.hidden ? POLL_HIDDEN_MS : POLL_MS);
+}
+
+function stopPolling() {
+    if (S.pollTimer) { clearTimeout(S.pollTimer); S.pollTimer = null; }
+}
+
+function pollTick() {
+    S.pollTimer = null;
+    if (!S.iid || !S.token) return;
+    if (S.busy) { startPolling(); return; }   // mid-animation; ask again shortly
+    api("/api/game/" + S.iid + "?since=" + S.drawn +
+        "&token=" + encodeURIComponent(S.token))
+        .then(applyPoll)
+        .catch(function (e) { toast(e.message); })
+        .then(function () {
+            if (S.state && S.state.over) return;   // nothing else will happen
+            startPolling();
+        });
+}
+
+function applyPoll(j) {
+    var st = j.state;
+    if (!st.started) {
+        S.state = st;
+        renderLobby(st);
+        showScreen("lobby");
+        return;
+    }
+    if (!$("lobby").hidden) enterGameScreen(st);
+    if (st.move_count === S.drawn) { applyState(st); return; }
+
+    var events = j.events || [];
+    if (!events.length) {          // too far behind to replay: just take the board
+        S.drawn = st.move_count;
+        applyState(st);
+        return;
+    }
+    setBusy(true);
+    return events.reduce(function (chain, e) {
+        return chain.then(function () {
+            return animate(e.frames, e.move, st.size_x).then(function () {
+                S.drawn = e.n;
+            });
+        });
+    }, Promise.resolve()).then(function () {
+        S.drawn = st.move_count;
+        applyState(st);
+        setBusy(false);
+    });
 }
 
 function bind() {
@@ -554,10 +822,41 @@ function bind() {
     $("btn-new").addEventListener("click", showSetup);
     $("btn-again").addEventListener("click", showSetup);
 
+    // -- online ---------------------------------------------------------
+    $("btn-join").addEventListener("click", joinGame);
+    $("in-code").addEventListener("input", function () {
+        this.value = this.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    });
+    $("in-code").addEventListener("keydown", function (e) {
+        if (e.key === "Enter") joinGame();
+    });
+    $("btn-copy").addEventListener("click", function () {
+        var link = shareLink(S.state && S.state.code);
+        var done = function () { toast("Link copied. Send it to your friends."); };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(link).then(done, function () { prompt("Copy this link:", link); });
+        } else {
+            prompt("Copy this link:", link);
+        }
+    });
+    $("btn-start-now").addEventListener("click", function () {
+        api("/api/game/" + S.iid + "/start", { method: "POST", body: { token: S.token } })
+            .then(function (j) { S.state = j.state; enterGameScreen(j.state); })
+            .catch(function (e) { toast(e.message); });
+    });
+    $("btn-lobby-cancel").addEventListener("click", showSetup);
+
+    // Keep the board on screen when the window changes shape, and ease off the
+    // polling while the tab is hidden.
+    window.addEventListener("resize", fitBoard);
+    document.addEventListener("visibilitychange", function () {
+        if (S.pollTimer) startPolling();
+    });
+
     $("btn-undo").addEventListener("click", function () {
         if (S.busy || !S.iid) return;
         setBusy(true);
-        api("/api/game/" + S.iid + "/undo", { method: "POST" })
+        api("/api/game/" + S.iid + "/undo", { method: "POST", body: { token: S.token } })
             .then(function (j) {
                 S.analysis = null;
                 ["pv-block", "cand-block", "net-block", "ladder-block"].forEach(function (id) {
@@ -588,8 +887,21 @@ function bind() {
     });
 }
 
+/** A friend's link looks like /?join=WDPL. Fill the code in and put the cursor
+ *  on Join — one click, no lobby to hunt through. */
+function readJoinLink() {
+    var m = /[?&]join=([A-Za-z0-9]{1,8})/.exec(location.search);
+    if (!m) return false;
+    $("in-code").value = m[1].toUpperCase();
+    $("in-join-name").focus();
+    $("join-card").scrollIntoView({ behavior: "smooth", block: "center" });
+    return true;
+}
+
 bind();
 paintSetup();
 refreshEngines();
+// A link to join beats walking back into an old game: the person clicked it.
+if (!readJoinLink()) resumeSeat();
 
 })();

@@ -19,10 +19,27 @@ python3 arena.py --help            # pit the engines against each other
 python3 bench_search.py --size 5 --time 3   # measure AlphaBeta search depth
 ```
 
-The web UI offers two players on one screen, or you against an engine. Against
-an engine it also shows what that engine is thinking: the line it expects
-(principal variation), the moves it weighed, and — for AlphaZero — the trained
-network's own read of the position as a heat map over the board.
+The web UI offers three ways to play:
+
+* **You against an engine.** It also shows what that engine is thinking: the
+  line it expects (principal variation), the moves it weighed, and — for
+  AlphaZero — the trained network's own read of the position as a heat map
+  over the board.
+* **One screen.** Two to five people taking turns on the same device.
+* **Online with friends.** Pick two to five seats and you get a four-letter
+  code. Send it round; each friend types it into "Join a friend" (or opens
+  `/?join=CODE`) and plays from their own browser. There is no lobby and no
+  account: whoever has the code is in, the game starts as soon as the last
+  seat fills, and the host can start early with whoever turned up. Each
+  browser polls once a second for the moves it has not drawn yet, so it
+  animates the real cascade rather than jumping to the new position. An
+  online game has no undo — there is nobody to ask.
+
+With three or more players a seat is knocked out once every cell belongs to
+somebody else: there is nowhere left to drop a block. Last one standing wins.
+Only humans can play that game — all three engines search a two-player tree.
+Humans-only games may also use a bigger board (up to 12x12) than an engine is
+allowed to search (8x8).
 
 AlphaZero only appears as an opponent once a network exists for that board size
 (`checkpoints/best.pt`). See [alphazero/README.md](alphazero/README.md) for
