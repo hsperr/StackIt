@@ -24,13 +24,22 @@ NET="${NET:-checkpoints/best.pt}"
 cd "$(dirname "$0")"
 
 echo "==> syncing code to $HOST:$PATH_REMOTE"
-# checkpoints/ is excluded so a deploy never deletes the trained net.
+# checkpoints/ is excluded so a deploy never deletes the trained net. The
+# checkpoints_* training arms and research/ are excluded because the server has
+# no use for them and they had grown to 143 MB of pointless transfer per deploy.
+# Note rsync's --delete leaves excluded paths on the server alone, which is the
+# point: the live net survives. Old arms already up there stay until removed by
+# hand — do NOT reach for --delete-excluded, it would take checkpoints/ with it.
 rsync -az --delete \
   --exclude '.git' \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
   --exclude '.pytest_cache' \
   --exclude 'checkpoints' \
+  --exclude 'checkpoints_*' \
+  --exclude 'checkpoints.*' \
+  --exclude '*.launch.log' \
+  --exclude 'research' \
   --exclude '_diag_*' \
   --exclude 'archive' \
   --exclude 'references' \
