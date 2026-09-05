@@ -119,8 +119,17 @@ def prefill_buffer(net, cfg, buffer, val_buffer, pool, rng, opponent_pool, targe
     """
     if target <= 0 or len(buffer) >= target:
         return
-    print(f"[prefill] filling replay buffer to {target} examples "
-          f"(have {len(buffer)}) with self-play from the current champion")
+    # Prefill costs one self-play game per ~160 augmented examples, so the target
+    # has to be sized in examples, NOT as a fraction of replay_capacity. Raising
+    # capacity 100k -> 1M silently turned `--prefill 1.0` from ~3 chunks into ~31,
+    # i.e. minutes into hours before the first training step ever runs. The point
+    # of prefilling is to start on a buffer that is diverse enough to train on,
+    # which does not require filling a window sized for 28 iterations of history.
+    per_chunk = max(1, cfg.games_per_iter * 160)
+    print(f"[prefill] filling replay buffer to {target:,} examples "
+          f"(have {len(buffer):,}, capacity {cfg.replay_capacity:,}) with self-play "
+          f"from the current champion — roughly {max(1, target // per_chunk)} chunks "
+          f"of {cfg.games_per_iter} games")
     t0 = time.time()
     games = 0
     chunk = 0
@@ -373,7 +382,9 @@ def run(cfg, resume=False, references_dir=None, init_from=None):
     ecfg = replace(cfg, num_simulations=cfg.eval_simulations)
 
     try:
-      if cfg.prefill_frac > 0:
+      prefill_target = (cfg.prefill_examples if cfg.prefill_examples > 0
+                        else int(cfg.prefill_frac * cfg.replay_capacity))
+      if prefill_target > 0:
         net.to(cpu)
         metrics.write_status(cfg, {"iter": start_iter, "phase": "prefill",
                                    "games": 0, "buffer": len(buffer)})
@@ -382,7 +393,7 @@ def run(cfg, resume=False, references_dir=None, init_from=None):
                     for i in (past[-cfg.pool_size:] if cfg.pool_size > 0 else [])
                     if i in registry]
         prefill_buffer(net, cfg, buffer, val_buffer, pool, rng, pre_pool,
-                       int(cfg.prefill_frac * cfg.replay_capacity))
+                       prefill_target)
 
       for it in range(start_iter + 1, cfg.iterations + 1):
         t_iter = time.time()
@@ -523,12 +534,12 @@ def run(cfg, resume=False, references_dir=None, init_from=None):
                 recent = (sum(ab_history[-win:]) / win) if len(ab_history) >= win else 0.0
                 if recent >= cfg.ab_stop_winrate and not ab_beaten:
                     ab_beaten = True
-                    print(f"[ab] AlphaBeta({cfg.alphabeta_budget}s) beaten "
+                    print(f"[ab] AlphaBeta(depth {cfg.alphabeta_depth}) beaten "
                           f"({recent:.0%} over last {win}) — from now on only re-checked "
                           f"every {cfg.ab_recheck_every} iterations")
                 elif recent < cfg.ab_stop_winrate and ab_beaten:
                     ab_beaten = False
-                    print(f"[ab] AlphaBeta({cfg.alphabeta_budget}s) back in play "
+                    print(f"[ab] AlphaBeta(depth {cfg.alphabeta_depth}) back in play "
                           f"({recent:.0%} over last {win})")
 
             if primary_ref is not None:
@@ -582,7 +593,7 @@ def run(cfg, resume=False, references_dir=None, init_from=None):
                                  "games": int(games.get("alphabeta", 0)), "best": False})
         metrics.write_ratings(cfg, {
             "anchor": cfg.elo_anchor, "anchor_value": cfg.elo_anchor_value,
-            "ab_budget": cfg.alphabeta_budget,
+            "ab_depth": cfg.alphabeta_depth,
             "best_iter": best_iter, "primary_ref": primary_ref,
             "elo": {k: round(v, 1) for k, v in elo.items()},
             "versions": version_rows,
@@ -668,6 +679,12 @@ def parse_args():
     ap.add_argument("--q-ratio", type=float, default=None, dest="value_q_ratio",
                     help="weight of the search's own value in the value target "
                          "(0 = pure game result, lc0-style blend at ~0.5)")
+    ap.add_argument("--prefill-examples", type=int, default=None,
+                    dest="prefill_examples",
+                    help="before the first training step, self-play until the replay "
+                         "buffer holds this many examples. Preferred over --prefill: "
+                         "it does not scale with replay_capacity. ~100000 is 3 chunks "
+                         "of games_per_iter.")
     ap.add_argument("--prefill", type=float, default=None, dest="prefill_frac",
                     help="before the first training step, self-play until the replay "
                          "buffer is this full (0-1). 1.0 = completely full. Use on "
@@ -710,6 +727,8 @@ def main():
         cfg.num_workers = a.num_workers
     if a.prefill_frac is not None:
         cfg.prefill_frac = max(0.0, min(1.0, a.prefill_frac))
+    if a.prefill_examples is not None:
+        cfg.prefill_examples = max(0, a.prefill_examples)
     if a.value_q_ratio is not None:
         cfg.value_q_ratio = max(0.0, min(1.0, a.value_q_ratio))
     if a.no_gumbel:

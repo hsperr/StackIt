@@ -42,6 +42,21 @@ class AZPlayer:
         else:
             counts, root = self.mcts.search(board, add_noise=explore, rng=rng)
         if counts.sum() == 0:
+            # A zero policy is only legitimate when the root is terminal. Anywhere
+            # else it means the search returned no visits, and returning None there
+            # used to abort the match and hand the point to the opponent by box
+            # count. Say what actually happened instead.
+            from .mcts_az import terminal_value
+            if terminal_value(board) is None:
+                raise RuntimeError(
+                    f"AZPlayer: search produced a zero policy on a non-terminal "
+                    f"board. sims={self.mcts.sims} time_budget={self.time_budget} "
+                    f"use_gumbel={self.mcts.use_gumbel} ply={self._ply} "
+                    f"root.is_terminal={root.is_terminal} "
+                    f"root.legal={None if root.legal is None else len(root.legal)} "
+                    f"child_N.sum={None if root.child_N is None else root.child_N.sum()} "
+                    f"selected_action={root.selected_action} "
+                    f"legal_moves={len(board.possible_moves())}")
             return None
         self._ply += 1
         return index_to_move(root.selected_action, board.size_x)
@@ -97,14 +112,22 @@ class CAlphaBetaPlayer:
 
 
 def make_alphabeta(cfg, budget):
-    """The fixed-budget AlphaBeta opponent, C or Python per `cfg.alphabeta_engine`.
-    Falls back to Python (loudly) if the C binary has not been built."""
+    """The AlphaBeta rating opponent, C or Python per `cfg.alphabeta_engine`.
+    Falls back to Python (loudly) if the C binary has not been built.
+
+    `cfg.alphabeta_depth` caps the search depth and `budget` is left effectively
+    infinite, so the wall clock never fires and iterative deepening always
+    completes that depth. This is what makes the bar reproducible: a wall-clock
+    budget makes the opponent's strength a function of machine load, which is why
+    the same seeded match used to score 38% / 25% / 0% on three consecutive runs.
+    """
+    depth = getattr(cfg, "alphabeta_depth", None)
     if getattr(cfg, "alphabeta_engine", "python") == "c":
-        p = CAlphaBetaPlayer(budget)
+        p = CAlphaBetaPlayer(budget, max_depth=depth or 40)
         if os.path.exists(p.binary):
             return p
         print(f"[arena] C engine not built at {p.binary} — using the Python AlphaBeta")
-    return AlphaBetaPlayer(budget)
+    return AlphaBetaPlayer(budget, max_depth=depth or 12)
 
 
 class RandomPlayer:
@@ -155,7 +178,12 @@ def play_match(player_a, player_b, n_games, board_size, max_plies, rng,
                 break
             mv = players[board.current_player].move(board, rng)
             if mv is None or tuple(mv) not in board.possible_moves():
-                break
+                # See the same guard in parallel.py: scoring an aborted game by
+                # box count is what produced every inflated AlphaBeta winrate.
+                raise RuntimeError(
+                    f"match aborted: player {board.current_player} returned "
+                    f"{mv!r} with {len(board.possible_moves())} legal moves "
+                    f"available")
             board.move(*mv)
         w = game_winner(board)                # 0 / 1 / 2
         if w == 0:

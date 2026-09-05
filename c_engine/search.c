@@ -293,6 +293,16 @@ SearchResult search_best_move(Board *b, double thinking_time, int max_depth) {
         ctx.killers[i][1] = -1;
     }
 
+    /* Commit a legal fallback BEFORE searching. Below, best_move is only written
+       when a depth completes inside the budget, so a squeezed engine answered
+       {"move":null} -- and alphazero scored that half-played board by box count,
+       handing the point to the opponent. A null from a position that has legal
+       moves is never a useful answer: the first root move is a bad move, not a
+       lie. */
+    result.best_move = root_moves[0];
+    result.score = 0;
+    result.depth = 0;
+
     int depth = 0;
     while (!time_over_exact(&ctx) && depth <= max_depth) {
         ctx.root_depth = depth;

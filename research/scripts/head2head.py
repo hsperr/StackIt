@@ -29,7 +29,10 @@ def main():
     pool = make_pool(WORKERS)
     try:
         t = time.time()
-        wa, wb, dr = match_parallel(arch_a, state_a, (arch_b, state_b), cfg,
+        # ("az", arch, state) — a bare (arch, state) pair used to fall through
+        # match_parallel's opponent dispatch into make_alphabeta(cfg, state), so
+        # this script never played net B at all.
+        wa, wb, dr = match_parallel(arch_a, state_a, ("az", arch_b, state_b), cfg,
                                     GAMES, 4242, pool, WORKERS)
         wr = win_rate(wa, wb, dr)
         se = (wr * (1 - wr) / GAMES) ** 0.5

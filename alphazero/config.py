@@ -90,7 +90,16 @@ class Config:
                                  # value head still memorised (train MSE 0.53 vs held-out 1.02
                                  # over rounds 2-9 of the 2026-08-18 run) because ~9000 training
                                  # rows carried only 70 distinct answers.
-    replay_capacity: int = 100_000   # samples kept in the replay buffer (post-augment)
+    replay_capacity: int = 1_000_000  # samples kept in the replay buffer (POST-augment, so this is
+                                 # 125k unique positions, not 1M). Was 100_000 = 12,500 unique,
+                                 # which is 3.1 iterations of self-play and sits in the steepest,
+                                 # most starved part of the measured data curve (268k unique ->
+                                 # 0.4647 top-1, 1.73M -> 0.4841). Note a large capacity is not a
+                                 # large window on day one: at ~4,540 unique/iteration it behaves
+                                 # exactly like KataGo's growing window for the first ~28
+                                 # iterations, and only then starts evicting. That is deliberate —
+                                 # a big FIXED buffer full of weak-net targets is the failure
+                                 # measured in the 2026-08-18 run.
     train_steps_per_iter: int = 400   # SGD minibatches per iteration. Tried raising 400->1200 at
                                  # round 34 of the 2026-08-18 run (hypothesis: undertrained, not
                                  # overfitted — see git history for the reasoning). Result once the
@@ -111,8 +120,16 @@ class Config:
                                  # own averaged search value, so every position carries its
                                  # own answer. Keep some z in the mix — it is the only label
                                  # that is not the net grading its own homework.
-    prefill_frac: float = 0.0    # before the FIRST training step, generate self-play with the
-                                 # loaded champion until the replay buffer is this full
+    prefill_examples: int = 0    # before the FIRST training step, generate self-play with the
+                                 # loaded champion until the buffer holds this many examples.
+                                 # Takes precedence over prefill_frac, and is the knob you want:
+                                 # a FRACTION of a window sized for many iterations of history is
+                                 # not a sensible prefill target. ~100k is 3 chunks of 200 games
+                                 # and is what every run before 2026-08-20 actually trained on;
+                                 # prefill_frac=1.0 against the 1M capacity would be 31 chunks,
+                                 # hours of self-play before a single training step.
+    prefill_frac: float = 0.0    # fraction-of-capacity form of the above, kept for old commands.
+                                 # Ignored when prefill_examples > 0.
                                  # (0 = off, 1.0 = full). A resume starts with an EMPTY buffer:
                                  # the fill_frac ramp below then trains lightly for ~4 rounds on
                                  # thin data, and every restart costs that. Prefilling pays the
@@ -149,11 +166,18 @@ class Config:
     alphabeta_engine: str = "c"       # "c" = the C engine in c_engine/ (~50x the nodes/sec of the
                                       # Python one, and it has the stand-pat quiescence fix);
                                       # "python" = the in-process AlphaBeta.
-    alphabeta_budget: float = 0.05    # seconds/move for the fixed-budget AlphaBeta rating opponent.
-                                      # Dropped 0.3->0.05 because the C engine at 0.3s reaches ~9.5
-                                      # ply and would simply shut out a fresh net, which measures
-                                      # nothing. 0.05s is still ~6-7 ply — a real ladder rung.
-    ab_elo_games: int = 8        # games vs fixed-budget AlphaBeta each iter (feeds its Elo)
+    alphabeta_depth: int = 7          # FIXED SEARCH DEPTH for the AlphaBeta rating opponent.
+                                      # A wall clock cannot be a rating bar: strength then depends
+                                      # on how busy the machine is, and worse, a budget the engine
+                                      # cannot finish a depth inside made it answer "no move" (see
+                                      # c_engine/search.c and the abort guard in parallel.py).
+                                      # Depth 7 is what 0.05s/move reached on an idle machine, so
+                                      # the rung is the same height — it just no longer moves.
+    alphabeta_budget: float = 1e9     # seconds/move. Kept only so the wall clock never fires and
+                                      # iterative deepening always completes `alphabeta_depth`.
+    ab_elo_games: int = 40       # games vs fixed-depth AlphaBeta each iter (feeds its Elo).
+                                 # Was 8, which is +-0.35 at 2 se — it could not distinguish "we
+                                 # lose every game" from "we win half". 40 gives +-0.11.
     ab_stop_winrate: float = 0.75  # once the mean winrate over the last `ab_stop_window`
     ab_stop_window: int = 3        # AlphaBeta matches reaches this, stop playing it every
     ab_recheck_every: int = 25     # iteration — it is beaten. Re-play it every Nth iteration
