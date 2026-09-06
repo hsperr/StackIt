@@ -7,7 +7,7 @@ import json
 
 import torch
 
-from .net import StackNet
+from .net import StackNet, build_net
 
 
 def ensure_dir(cfg):
@@ -70,7 +70,7 @@ def save_checkpoint(cfg, net, name, extra=None):
 def load_net(path, device):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     a = ckpt["arch"]
-    net = StackNet(a["board_size"], a["channels"], a["res_blocks"]).to(device)
+    net = build_net(a, ckpt["state"]).to(device)
     net.load_state_dict(ckpt["state"])
     net.eval()
     return net, ckpt

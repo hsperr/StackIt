@@ -19,3 +19,16 @@ ratings.json
 status.json
 last_game.json
 *.jsonl.lock
+
+# Training arms (each run gets its own dir; logs and jsonl live inside them)
+checkpoints_*/
+checkpoints.*/
+*.launch.log
+
+# C engine build artifacts (sources only; build with c_engine/Makefile)
+c_engine/*.o
+c_engine/stackit
+c_engine/stackit_*
+c_engine/dump
+c_engine/dump-verify
+c_engine/*.dSYM/

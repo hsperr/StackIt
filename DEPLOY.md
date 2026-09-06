@@ -23,7 +23,9 @@ has none — PyTorch's import peak is the tightest moment.
 
 ## The one rule: a single worker
 
-Games live in the process's memory. Run more than one gunicorn **worker** and
+Games live in the process's memory, and an online game is shared by several
+browsers at once, so every one of them must land in the same process.
+Run more than one gunicorn **worker** and
 each request lands on a random process, so half of them cannot find the game.
 Verified: with `-w 3`, 6 of 12 lookups of a live game returned 404.
 
@@ -148,16 +150,40 @@ there is nothing to configure at deploy time:
 | constant | value | why |
 |---|---|---|
 | `MAX_THINKING_TIME` | 5 s | the longest one request can hold a core |
-| `MAX_BOARD` | 8 | search cost climbs steeply with board size |
-| `MAX_GAMES` | 16 | live games in memory; the oldest is evicted |
+| `MAX_BOARD` | 8 | an engine has to search it, and cost climbs steeply |
+| `MAX_BOARD_HUMANS` | 12 | nothing searches a humans-only game |
+| `MAX_PLAYERS` | 5 | seats in a humans-only game |
+| `MAX_ENGINE_GAMES` | 16 | live "you vs computer" games; the oldest is evicted |
+| `MAX_HUMAN_GAMES` | 48 | live one-screen and online games, evicted the same way |
+| `MAX_EVENTS` | 4 | recent moves kept so a slow browser can catch up |
+| `GAME_TTL` | 1 h | a game nobody has touched for this long is dropped |
 
-`MAX_GAMES` is the memory-sensitive one. An MCTS game grows by roughly 1 MB per
-move and never shrinks, so a long MCTS game can reach tens of megabytes. Sixteen
-of them is the worst case this box can take alongside PyTorch. Raise these
-together with the RAM, not on their own.
+The two game caps are separate because the two kinds cost wildly different
+amounts of memory, and online play needs many cheap games at once:
 
-There is no login and no rate limiting. If it will be publicly reachable, rate
-limit it at the proxy.
+| kind | measured | why |
+|---|---|---|
+| "you vs computer", MCTS | 12 MB after 60 plies, still growing | the search tree is kept between moves and never shrinks |
+| online / one screen | 1.15 MB after 3000 plies on 12x12 with 5 seats | no search tree, and no undo stack |
+
+An online game keeps no undo stack at all — it refuses take-backs, so there is
+nothing to keep. Without that it was 13.5 MB instead of 1.15 MB.
+
+Sixteen engine games is the worst case this box can take alongside PyTorch, so
+that number has not moved. Raise it together with the RAM, not on its own.
+
+## Online games and the proxy
+
+Each browser in an online game polls once a second, so a five-player game is
+five small requests a second. They are cheap — a poll is one `state()` build,
+no search — but they are constant, so leave `--threads 8` alone and do not put
+a tight connection limit in front of it.
+
+There is no login and no rate limiting. A join code is four characters from a
+32-letter alphabet, about a million combinations, which is enough to stop a
+friend guessing but not a script. Nothing sensitive sits behind one — the worst
+case is a stranger taking a seat in your game. If it will be publicly reachable,
+rate limit `/api/join` at the proxy.
 
 ## Updating
 

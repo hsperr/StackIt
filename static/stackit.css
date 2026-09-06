@@ -2,6 +2,7 @@
    StackIt — bright, tactile block theme.
    Palette: cool paper background, deep-indigo ink, and a colourblind-safe
    AZURE (player 1) vs TANGERINE (player 2) pair from the Okabe-Ito family.
+   Seats 3 to 5 (humans-only games) continue that family: green, magenta, gold.
    ========================================================================== */
 
 :root {
@@ -22,6 +23,21 @@
     --p2-top:    #ffab55;
     --p2-edge:   #e06d00;
     --p2-soft:   #fff0df;
+
+    --p3:        #00a37a;
+    --p3-top:    #35c79f;
+    --p3-edge:   #007d5c;
+    --p3-soft:   #dcf5ec;
+
+    --p4:        #d1559a;
+    --p4-top:    #e483bb;
+    --p4-edge:   #a63a76;
+    --p4-soft:   #fbe6f2;
+
+    --p5:        #d4a017;
+    --p5-top:    #edbe45;
+    --p5-edge:   #a37800;
+    --p5-soft:   #fbf0d3;
 
     --slot:      #dde3f0;
     --slot-line: #c2cbe0;
@@ -106,7 +122,8 @@ body {
 [hidden] { display: none !important; }
 
 .setup-screen {
-    display: flex; justify-content: center;
+    display: flex; justify-content: center; align-items: flex-start;
+    flex-wrap: wrap; gap: 18px;
     padding: 10px clamp(14px, 4vw, 40px) 60px;
 }
 .setup-card { width: min(560px, 100%); padding: 26px 26px 24px; }
@@ -141,6 +158,9 @@ body {
 .swatch { width: 16px; height: 16px; border-radius: 5px; flex: none; }
 .swatch.p1 { background: var(--p1); box-shadow: inset 0 -2px 0 var(--p1-edge); }
 .swatch.p2 { background: var(--p2); box-shadow: inset 0 -2px 0 var(--p2-edge); }
+.swatch.p3 { background: var(--p3); box-shadow: inset 0 -2px 0 var(--p3-edge); }
+.swatch.p4 { background: var(--p4); box-shadow: inset 0 -2px 0 var(--p4-edge); }
+.swatch.p5 { background: var(--p5); box-shadow: inset 0 -2px 0 var(--p5-edge); }
 
 .stepper { display: flex; align-items: center; gap: 6px; }
 .stepper input {
@@ -177,9 +197,12 @@ body {
 
 /* ------------------------------------------------------------- scoreboard */
 .scoreboard {
-    display: flex; align-items: stretch; gap: 10px;
+    display: flex; align-items: stretch; flex-wrap: wrap; gap: 10px;
     width: 100%; max-width: 640px;
 }
+/* With three or more seats the cards go two-up rather than shrinking to
+   nothing on a phone. */
+.scoreboard.many .pcard { flex: 0 1 calc(50% - 5px); }
 .pcard {
     flex: 1; display: flex; align-items: center; gap: 11px;
     background: var(--card); border: 2px solid var(--line);
@@ -191,8 +214,19 @@ body {
 }
 .pcard[data-p="1"] .dot { background: var(--p1); box-shadow: inset 0 -3px 0 var(--p1-edge); }
 .pcard[data-p="2"] .dot { background: var(--p2); box-shadow: inset 0 -3px 0 var(--p2-edge); }
+.pcard[data-p="3"] .dot { background: var(--p3); box-shadow: inset 0 -3px 0 var(--p3-edge); }
+.pcard[data-p="4"] .dot { background: var(--p4); box-shadow: inset 0 -3px 0 var(--p4-edge); }
+.pcard[data-p="5"] .dot { background: var(--p5); box-shadow: inset 0 -3px 0 var(--p5-edge); }
 .pcard.active[data-p="1"] { border-color: var(--p1); box-shadow: 0 0 0 4px var(--p1-soft); }
 .pcard.active[data-p="2"] { border-color: var(--p2); box-shadow: 0 0 0 4px var(--p2-soft); }
+.pcard.active[data-p="3"] { border-color: var(--p3); box-shadow: 0 0 0 4px var(--p3-soft); }
+.pcard.active[data-p="4"] { border-color: var(--p4); box-shadow: 0 0 0 4px var(--p4-soft); }
+.pcard.active[data-p="5"] { border-color: var(--p5); box-shadow: 0 0 0 4px var(--p5-soft); }
+/* knocked out, or a seat nobody has taken yet */
+.pcard.out, .pcard.empty { opacity: .45; }
+.pcard.out .name { text-decoration: line-through; }
+.pcard.empty { border-style: dashed; }
+.pcard.you { border-color: var(--ink-faint); }
 .pcard .meta { display: flex; flex-direction: column; min-width: 0; }
 .pcard .name {
     font-family: var(--display); font-size: 16px; font-weight: 600;
@@ -248,6 +282,21 @@ body {
     box-shadow: inset 0 -4px 0 var(--p2-edge), var(--shadow-sm);
     color: #fff;
 }
+.cell[data-owner="3"] {
+    background: linear-gradient(160deg, var(--p3-top), var(--p3));
+    box-shadow: inset 0 -4px 0 var(--p3-edge), var(--shadow-sm);
+    color: #fff;
+}
+.cell[data-owner="4"] {
+    background: linear-gradient(160deg, var(--p4-top), var(--p4));
+    box-shadow: inset 0 -4px 0 var(--p4-edge), var(--shadow-sm);
+    color: #fff;
+}
+.cell[data-owner="5"] {
+    background: linear-gradient(160deg, var(--p5-top), var(--p5));
+    box-shadow: inset 0 -4px 0 var(--p5-edge), var(--shadow-sm);
+    color: #fff;
+}
 .cell.playable { cursor: pointer; }
 .cell.playable:hover { transform: translateY(-2px) scale(1.03); }
 .cell.playable[data-owner="0"]:hover { background: #e7ecf8; }
@@ -281,7 +330,7 @@ body {
     background: rgba(255,255,255,.86); border-radius: 5px; padding: 0 3px;
     pointer-events: none;
 }
-.cell[data-owner="1"] .heat-num, .cell[data-owner="2"] .heat-num { color: var(--ink); }
+.cell:not([data-owner="0"]) .heat-num { color: var(--ink); }
 
 /* cascade animations */
 .cell.pop  { animation: pop .26s ease; }
@@ -432,3 +481,52 @@ body {
 @media (prefers-reduced-motion: reduce) {
     * { animation-duration: .001s !important; transition-duration: .001s !important; }
 }
+
+/* --------------------------------------------------------------- lobby --- */
+/* Shown to an online host (and the friends who joined) until every seat is
+   taken. There is no lobby chat and no ready-up: just the code and a count. */
+.lobby-card { text-align: center; max-width: 460px; }
+.lobby-card h2 { margin-bottom: 4px; }
+.lobby-code {
+    font-family: var(--display); font-size: 46px; font-weight: 700;
+    letter-spacing: .14em; color: var(--p1);
+    background: var(--p1-soft); border-radius: 14px;
+    padding: 12px 10px 10px; margin: 12px 0 6px;
+    user-select: all;
+}
+.lobby-hint { font-size: 13.5px; color: var(--ink-soft); margin: 0 0 14px; }
+.lobby-seats { display: flex; flex-direction: column; gap: 7px; margin: 14px 0; }
+.lobby-seat {
+    display: flex; align-items: center; gap: 10px; text-align: left;
+    border: 1px solid var(--line); border-radius: 11px; padding: 8px 11px;
+}
+.lobby-seat.empty { border-style: dashed; color: var(--ink-faint); }
+.lobby-seat .who { font-weight: 600; }
+.lobby-actions { display: flex; gap: 9px; justify-content: center; }
+.waiting {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 13.5px; color: var(--ink-soft);
+}
+
+/* the code box on the setup screen */
+#join-card { width: min(360px, 100%); }
+.join-row { display: flex; gap: 9px; }
+.join-row input {
+    flex: 1; min-width: 0; text-transform: uppercase;
+    font-family: var(--display); font-size: 22px; font-weight: 600;
+    letter-spacing: .18em; text-align: center; color: var(--ink);
+    background: var(--bg-2); border: 1px solid var(--line);
+    border-radius: 11px; padding: 9px 4px;
+}
+.name-input {
+    width: 100%; font-family: var(--body); font-size: 15px; color: var(--ink);
+    background: var(--bg-2); border: 1px solid var(--line);
+    border-radius: 11px; padding: 10px 12px;
+}
+
+/* whose turn it is, on the turn bar, in that player's colour */
+.turn-text .who-1 { color: var(--p1-edge); font-weight: 700; }
+.turn-text .who-2 { color: var(--p2-edge); font-weight: 700; }
+.turn-text .who-3 { color: var(--p3-edge); font-weight: 700; }
+.turn-text .who-4 { color: var(--p4-edge); font-weight: 700; }
+.turn-text .who-5 { color: var(--p5-edge); font-weight: 700; }

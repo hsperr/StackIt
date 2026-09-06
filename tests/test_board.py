@@ -190,3 +190,78 @@ def test_flip_move_matches_actual_board_flip():
             new_x, new_y = flip_move((x, y), flipped.size_x, flipped.size_y)
             assert flipped.board[new_y][new_x] == value
 
+
+
+# ---------------------------------------------------------------------------
+# Three to five players. Seats are numbered 1..num_players and the turn skips
+# anyone who has nowhere left to play.
+# ---------------------------------------------------------------------------
+
+def test_turn_order_cycles_through_every_seat():
+    board = Board(4, 4, num_players=4)
+    seen = []
+    for _ in range(8):
+        seen.append(board.current_player)
+        board.move(*board.possible_moves()[0])
+    assert seen == [1, 2, 3, 4, 1, 2, 3, 4]
+
+
+def test_a_player_with_nowhere_to_play_is_skipped():
+    # Player 2 owns nothing and there is no empty cell left, so the turn goes
+    # straight from 1 to 3.
+    grid = [[1, 1], [1, 1]]
+    owner = [[1, 3], [3, 3]]
+    board = Board.from_custom_board(grid, owner, current_player=1, num_players=3)
+    assert board.can_move(1) and board.can_move(3)
+    assert not board.can_move(2)
+    assert board.alive_players() == [1, 3]
+    board.move(0, 0)
+    assert board.current_player == 3
+
+
+def test_owning_every_cell_wins_for_any_seat():
+    grid = [[1, 1], [1, 1]]
+    for seat in (1, 2, 3):
+        owner = [[seat, seat], [seat, seat]]
+        board = Board.from_custom_board(grid, owner, current_player=seat, num_players=3)
+        assert board.winning_player() == seat
+
+
+def test_an_empty_cell_means_nobody_has_won_yet():
+    grid = [[1, 0], [1, 1]]
+    owner = [[3, 0], [3, 3]]
+    board = Board.from_custom_board(grid, owner, current_player=1, num_players=3)
+    assert board.winning_player() == 0
+
+
+def test_copy_and_symmetries_keep_the_player_count():
+    board = Board(4, 4, num_players=5)
+    board.move(0, 0)
+    for other in (board.copy(), board.flip(), board.rotate()):
+        assert other.num_players == 5
+
+
+def test_hash_matches_a_recompute_after_every_move_and_undo():
+    import random
+    rng = random.Random(11)
+    board = Board(5, 5, num_players=4)
+    for _ in range(60):
+        moves = board.possible_moves()
+        if not moves or board.winning_player():
+            break
+        board.move(*rng.choice(moves))
+        assert board.zkey == board._compute_zkey()
+    while board.history:
+        board.undo()
+        assert board.zkey == board._compute_zkey()
+    assert board.zkey == Board(5, 5, num_players=4).zkey
+
+
+def test_two_player_boards_are_untouched_by_the_extra_seats():
+    # The engines rely on this: a normal board must still hash and flip sides
+    # exactly as it always did.
+    board = Board(5, 5)
+    assert board.num_players == 2
+    board.move(2, 2)
+    assert board.current_player == 2
+    assert board.other_player == 1

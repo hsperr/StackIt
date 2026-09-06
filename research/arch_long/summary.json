@@ -1,0 +1,10 @@
+[
+  {
+    "arm": "conv64x4",
+    "head": "conv",
+    "channels": 64,
+    "blocks": 4,
+    "params": 340167,
+    "best_top1": 0.4841
+  }
+]

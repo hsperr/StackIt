@@ -30,7 +30,7 @@ import torch
 import torch.nn.functional as F
 
 from .config import Config
-from .net import StackNet, resolve_device
+from .net import StackNet, build_net, resolve_device
 from .replay import ReplayBuffer
 from .selfplay import expand_symmetries
 from .arena_eval import win_rate
@@ -86,7 +86,11 @@ def eval_net(net, val_buffer, cfg, device):
         chunk = [val_buffer.buf[j] for j in range(i, min(i + cfg.batch_size, n))]
         planes = torch.from_numpy(np.stack([c[0] for c in chunk])).to(device)
         pi = torch.from_numpy(np.stack([c[1] for c in chunk])).to(device)
-        z = torch.from_numpy(np.array([c[2] for c in chunk], dtype=np.float32)).to(device)
+        # c[4] is the raw game result when cfg.value_q_ratio blends the training
+        # target; score held-out value against THAT so the number means the same
+        # thing across runs. Falls back to c[2] for data recorded without it.
+        z = torch.from_numpy(np.array([(c[4] if len(c) > 4 else c[2]) for c in chunk],
+                                      dtype=np.float32)).to(device)
         logits, v, _ = net(planes)
         b = len(chunk)
         tp += float(-(pi * F.log_softmax(logits, dim=1)).sum(dim=1).sum())
@@ -98,6 +102,55 @@ def eval_net(net, val_buffer, cfg, device):
         seen += b
     return (tp / seen, tv / seen, hit / seen,
             sign_hit / sign_tot if sign_tot else float("nan"))
+
+
+def prefill_buffer(net, cfg, buffer, val_buffer, pool, rng, opponent_pool, target):
+    """Fill the replay buffer with fresh self-play from the CURRENT champion before
+    the first training step.
+
+    A --resume starts with an empty buffer: `fill_frac` then throttles the step
+    count for the ~4 rounds it takes to refill, so every restart wastes rounds,
+    and the rounds that do train see a thin, low-diversity buffer. Prefilling pays
+    that self-play cost once, up front, in one generation of weights — which is
+    exactly the data distribution the buffer is supposed to hold.
+
+    Runs in chunks of cfg.games_per_iter so progress is visible and the held-out
+    split (cfg.val_frac) is applied the same way the training loop applies it.
+    """
+    if target <= 0 or len(buffer) >= target:
+        return
+    # Prefill costs one self-play game per ~160 augmented examples, so the target
+    # has to be sized in examples, NOT as a fraction of replay_capacity. Raising
+    # capacity 100k -> 1M silently turned `--prefill 1.0` from ~3 chunks into ~31,
+    # i.e. minutes into hours before the first training step ever runs. The point
+    # of prefilling is to start on a buffer that is diverse enough to train on,
+    # which does not require filling a window sized for 28 iterations of history.
+    per_chunk = max(1, cfg.games_per_iter * 160)
+    print(f"[prefill] filling replay buffer to {target:,} examples "
+          f"(have {len(buffer):,}, capacity {cfg.replay_capacity:,}) with self-play "
+          f"from the current champion — roughly {max(1, target // per_chunk)} chunks "
+          f"of {cfg.games_per_iter} games")
+    t0 = time.time()
+    games = 0
+    chunk = 0
+    while len(buffer) < target:
+        # a distinct seed space from the training loop's (cfg.seed + it * 100000),
+        # so prefill games are not replays of iteration 1..N games.
+        examples, _ = selfplay_parallel(
+            net, cfg, cfg.games_per_iter, base_seed=cfg.seed + 900_000_000 + chunk * 100000,
+            pool=pool, n_workers=cfg.num_workers, opponent_pool=opponent_pool)
+        n_val = int(len(examples) * cfg.val_frac)
+        if n_val:
+            perm = rng.permutation(len(examples))
+            val_buffer.add_many([examples[i] for i in perm[:n_val]])
+            examples = [examples[i] for i in perm[n_val:]]
+        buffer.add_many(expand_symmetries(examples, cfg))
+        games += cfg.games_per_iter
+        chunk += 1
+        print(f"[prefill] {len(buffer)}/{target} examples after {games} games "
+              f"({time.time() - t0:.0f}s)")
+    print(f"[prefill] done: {len(buffer)} examples, {len(val_buffer)} held out, "
+          f"{games} games, {time.time() - t0:.0f}s")
 
 
 def _load_ckpt(path):
@@ -188,7 +241,7 @@ def seed_reference_book(book, registry, ref_ids, cfg, pool, rng):
             book.add_match(ref_ids[i], ref_ids[j], wa, wb, dr)
 
 
-def run(cfg, resume=False, references_dir=None):
+def run(cfg, resume=False, references_dir=None, init_from=None):
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
@@ -200,7 +253,21 @@ def run(cfg, resume=False, references_dir=None):
 
     metrics.ensure_dir(cfg)
 
-    net = StackNet(cfg.board_size, cfg.channels, cfg.res_blocks)
+    net = StackNet(cfg.board_size, cfg.channels, cfg.res_blocks,
+                   cfg.policy_head)
+    # --init-from: start self-play from a net trained elsewhere (e.g. supervised
+    # imitation of AlphaBeta). Weights only -- no version registry, no match
+    # history, no iteration counter -- so this is a fresh run with a warm prior,
+    # which is what --resume is NOT. The architecture comes from the checkpoint
+    # rather than from cfg, because a mismatched head silently fails to load.
+    if init_from:
+        pre = torch.load(init_from, map_location="cpu", weights_only=False)
+        net = build_net(pre["arch"], pre["state"])
+        net.load_state_dict(pre["state"])
+        cfg.channels, cfg.res_blocks = net.arch()["channels"], net.arch()["res_blocks"]
+        cfg.policy_head = net.policy_head
+        print(f"[init] {init_from} -> {cfg.res_blocks}x{cfg.channels} "
+              f"{cfg.policy_head}-head, extra={pre.get('extra', {})}")
     # AdamW, not Adam: Adam folds weight_decay into the gradient, and its per-parameter
     # scaling then decays low-gradient weights far harder than intended. AdamW decouples it.
     opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
@@ -315,6 +382,19 @@ def run(cfg, resume=False, references_dir=None):
     ecfg = replace(cfg, num_simulations=cfg.eval_simulations)
 
     try:
+      prefill_target = (cfg.prefill_examples if cfg.prefill_examples > 0
+                        else int(cfg.prefill_frac * cfg.replay_capacity))
+      if prefill_target > 0:
+        net.to(cpu)
+        metrics.write_status(cfg, {"iter": start_iter, "phase": "prefill",
+                                   "games": 0, "buffer": len(buffer)})
+        past = champion_ids[:-1]
+        pre_pool = [_load_ckpt(registry[i]["path"])
+                    for i in (past[-cfg.pool_size:] if cfg.pool_size > 0 else [])
+                    if i in registry]
+        prefill_buffer(net, cfg, buffer, val_buffer, pool, rng, pre_pool,
+                       prefill_target)
+
       for it in range(start_iter + 1, cfg.iterations + 1):
         t_iter = time.time()
         cand_id = f"v{it}"
@@ -362,7 +442,15 @@ def run(cfg, resume=False, references_dir=None):
         lr_now = cfg.lr_min + 0.5 * (cfg.lr - cfg.lr_min) * (1.0 + math.cos(math.pi * frac))
         for gparam in opt.param_groups:
             gparam["lr"] = lr_now
-        steps = cfg.train_steps_per_iter if len(buffer) >= cfg.batch_size else 0
+        # Scale steps to how FULL the buffer is, not just "bigger than one batch".
+        # A cold/post-resume buffer is thin (few distinct games), so the full step
+        # count reuses each position many times in one round and overfits to it —
+        # measured after the 2026-08-18 resume: value train MSE fell 0.80->0.56
+        # while held-out ROSE 0.91->1.00 during the 4 rounds it took the buffer to
+        # refill. Ramping steps with fill_frac makes early post-resume rounds train
+        # lightly (like a fresh run naturally does) instead of overtraining on thin data.
+        fill_frac = min(1.0, len(buffer) / cfg.replay_capacity)
+        steps = int(cfg.train_steps_per_iter * fill_frac) if len(buffer) >= cfg.batch_size else 0
         if steps:
             pol_loss, val_loss, own_loss = train_net(net, opt, buffer, cfg, train_device, steps)
         else:
@@ -385,6 +473,18 @@ def run(cfg, resume=False, references_dir=None):
         # as self-play itself). Run the whole block only every Nth iteration so the
         # clock goes into learning; Elo/gate points simply appear less often.
         do_eval = steps and (it % cfg.eval_every == 0 or it == cfg.iterations)
+        # The Elo matches (vs previous best + the gauntlet) run on only every Nth
+        # eval block, but with many more games each. A 4-game sample cannot tell
+        # two nets 3 rounds apart apart at all: the chart drifted DOWN over 50
+        # rounds while a 40-game v156-vs-v105 match went 28-12 for the newer net.
+        # Same total game budget, ~5x the resolution, far fewer misleading points.
+        # `best_iter == 0` forces the FIRST eval block to play the previous best,
+        # which is still v0. Without it the very first candidate has no game
+        # against v0, compute_elo cannot find its anchor, and every rating on the
+        # chart floats on an arbitrary scale until the first scheduled gauntlet.
+        do_gauntlet = do_eval and ((it // cfg.eval_every) % cfg.gauntlet_every == 0
+                                   or best_iter == 0
+                                   or it == cfg.iterations)
         if do_eval:
             metrics.save_version(cfg, net, it)
             registry[cand_id] = {"path": os.path.join(cfg.ckpt_dir, "versions", f"v{it}.pt"),
@@ -402,11 +502,12 @@ def run(cfg, resume=False, references_dir=None):
             # eval matches run at reduced sims (ecfg) — same for both sides, so fair.
             metrics.write_status(cfg, {"iter": it, "phase": "gate", "buffer": len(buffer)})
             n_vs_best = cfg.eval_games if cfg.use_gate else cfg.gauntlet_games
-            wa, wb, dr = match_parallel(a_arch, a_state, _az_opp(registry, f"v{best_iter}"), ecfg,
-                                        n_vs_best, base + 50000, pool, cfg.num_workers)
-            cand_wr = win_rate(wa, wb, dr)
+            if cfg.use_gate or do_gauntlet:
+                wa, wb, dr = match_parallel(a_arch, a_state, _az_opp(registry, f"v{best_iter}"),
+                                            ecfg, n_vs_best, base + 50000, pool, cfg.num_workers)
+                cand_wr = win_rate(wa, wb, dr)
+                book.add_match(cand_id, f"v{best_iter}", wa, wb, dr)
             accepted = (cand_wr >= cfg.eval_win_threshold) if cfg.use_gate else True
-            book.add_match(cand_id, f"v{best_iter}", wa, wb, dr)
 
             metrics.write_status(cfg, {"iter": it, "phase": "benchmark", "buffer": len(buffer)})
             if cfg.benchmark_games > 0:          # off by default — the net sweeps random
@@ -433,12 +534,12 @@ def run(cfg, resume=False, references_dir=None):
                 recent = (sum(ab_history[-win:]) / win) if len(ab_history) >= win else 0.0
                 if recent >= cfg.ab_stop_winrate and not ab_beaten:
                     ab_beaten = True
-                    print(f"[ab] AlphaBeta({cfg.alphabeta_budget}s) beaten "
+                    print(f"[ab] AlphaBeta(depth {cfg.alphabeta_depth}) beaten "
                           f"({recent:.0%} over last {win}) — from now on only re-checked "
                           f"every {cfg.ab_recheck_every} iterations")
                 elif recent < cfg.ab_stop_winrate and ab_beaten:
                     ab_beaten = False
-                    print(f"[ab] AlphaBeta({cfg.alphabeta_budget}s) back in play "
+                    print(f"[ab] AlphaBeta(depth {cfg.alphabeta_depth}) back in play "
                           f"({recent:.0%} over last {win})")
 
             if primary_ref is not None:
@@ -448,12 +549,13 @@ def run(cfg, resume=False, references_dir=None):
                 book.add_match(cand_id, primary_ref, wa, wb, dr)
 
             # gauntlet: candidate vs a spread of past versions (Elo connectivity)
-            others = [i for i in version_ids if i not in (cand_id, f"v{best_iter}")]
-            for k, oid in enumerate(sample_ids(others, cfg.gauntlet_versions, rng)):
-                wa, wb, dr = match_parallel(a_arch, a_state, _az_opp(registry, oid), ecfg,
-                                            cfg.gauntlet_games, base + 80000 + k * 1000,
-                                            pool, cfg.num_workers)
-                book.add_match(cand_id, oid, wa, wb, dr)
+            if do_gauntlet:
+                others = [i for i in version_ids if i not in (cand_id, f"v{best_iter}")]
+                for k, oid in enumerate(sample_ids(others, cfg.gauntlet_versions, rng)):
+                    wa, wb, dr = match_parallel(a_arch, a_state, _az_opp(registry, oid), ecfg,
+                                                cfg.gauntlet_games, base + 80000 + k * 1000,
+                                                pool, cfg.num_workers)
+                    book.add_match(cand_id, oid, wa, wb, dr)
 
             elo = compute_elo(book, anchor=cfg.elo_anchor, anchor_elo=cfg.elo_anchor_value,
                               prior_draws=cfg.elo_prior_draws)
@@ -491,7 +593,7 @@ def run(cfg, resume=False, references_dir=None):
                                  "games": int(games.get("alphabeta", 0)), "best": False})
         metrics.write_ratings(cfg, {
             "anchor": cfg.elo_anchor, "anchor_value": cfg.elo_anchor_value,
-            "ab_budget": cfg.alphabeta_budget,
+            "ab_depth": cfg.alphabeta_depth,
             "best_iter": best_iter, "primary_ref": primary_ref,
             "elo": {k: round(v, 1) for k, v in elo.items()},
             "versions": version_rows,
@@ -570,6 +672,23 @@ def parse_args():
     ap.add_argument("--device", default=d.device)
     ap.add_argument("--seed", type=int, default=d.seed)
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--init-from", default=None, dest="init_from",
+                    help="path to a .pt whose weights seed the net. Fresh run "
+                         "(iter 0, empty history), warm prior. Arch is read from "
+                         "the checkpoint. Not compatible with --resume.")
+    ap.add_argument("--q-ratio", type=float, default=None, dest="value_q_ratio",
+                    help="weight of the search's own value in the value target "
+                         "(0 = pure game result, lc0-style blend at ~0.5)")
+    ap.add_argument("--prefill-examples", type=int, default=None,
+                    dest="prefill_examples",
+                    help="before the first training step, self-play until the replay "
+                         "buffer holds this many examples. Preferred over --prefill: "
+                         "it does not scale with replay_capacity. ~100000 is 3 chunks "
+                         "of games_per_iter.")
+    ap.add_argument("--prefill", type=float, default=None, dest="prefill_frac",
+                    help="before the first training step, self-play until the replay "
+                         "buffer is this full (0-1). 1.0 = completely full. Use on "
+                         "--resume: the buffer is not persisted across restarts.")
     ap.add_argument("--references-dir", default=None,
                     help="dir of previous best .pt models to keep as fixed opponents")
     ap.add_argument("--quick", action="store_true",
@@ -606,6 +725,12 @@ def main():
         cfg.ab_bench_file = os.path.join(a.ckpt_dir, "ab_bench.jsonl")
     if a.num_workers is not None:
         cfg.num_workers = a.num_workers
+    if a.prefill_frac is not None:
+        cfg.prefill_frac = max(0.0, min(1.0, a.prefill_frac))
+    if a.prefill_examples is not None:
+        cfg.prefill_examples = max(0, a.prefill_examples)
+    if a.value_q_ratio is not None:
+        cfg.value_q_ratio = max(0.0, min(1.0, a.value_q_ratio))
     if a.no_gumbel:
         cfg.self_play_gumbel = False
     if a.pcr_prob is not None:
@@ -629,7 +754,12 @@ def main():
         cfg.ab_bench_think = 0.15
         cfg.ab_bench_games = 2
         cfg.ab_bench_workers = 2
-    run(cfg, resume=a.resume, references_dir=a.references_dir)
+    if a.init_from and a.resume:
+        raise SystemExit("--init-from and --resume are mutually exclusive: one "
+                         "starts a fresh run from given weights, the other "
+                         "continues an old run.")
+    run(cfg, resume=a.resume, references_dir=a.references_dir,
+        init_from=a.init_from)
 
 
 if __name__ == "__main__":

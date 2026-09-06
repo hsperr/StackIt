@@ -17,9 +17,9 @@ import torch
 
 from board import Board
 from .config import Config
-from .net import StackNet, Evaluator
+from .net import StackNet, build_net, Evaluator
 from .selfplay import play_game, game_winner
-from .arena_eval import AZPlayer, RandomPlayer, AlphaBetaPlayer
+from .arena_eval import AZPlayer, RandomPlayer, make_alphabeta
 
 _CTX = get_context("spawn")
 _CPU = torch.device("cpu")
@@ -30,7 +30,7 @@ def _init_worker():
 
 
 def _build_net(arch, state):
-    net = StackNet(arch["board_size"], arch["channels"], arch["res_blocks"])
+    net = build_net(arch, state)
     net.load_state_dict(state)
     net.eval()
     return net
@@ -107,7 +107,16 @@ def _match_chunk(payload):
             return AZPlayer(b_ev, cfg)
         if opp[0] == "random":
             return RandomPlayer()
-        return AlphaBetaPlayer(opp[1])              # ("alphabeta", budget)
+        if opp[0] == "alphabeta":
+            return make_alphabeta(cfg, opp[1])
+        # Anything else is a caller bug, and it used to fall through to the line
+        # above: research/scripts/head2head.py passed a bare (arch, state) pair,
+        # so `state` was handed to the C engine as its seconds-per-move, the
+        # protocol line was garbage, the engine answered null every time, and the
+        # "net A vs net B" number it printed was really net-A-versus-nothing.
+        raise ValueError(
+            f"unknown opponent spec {opp[0]!r}; expected ('az', arch, state), "
+            f"('random',) or ('alphabeta', budget)")
 
     out = []
     for first_is_a, seed in specs:
@@ -117,12 +126,35 @@ def _match_chunk(payload):
         p1, p2 = (pa, pb) if first_is_a else (pb, pa)
         players = {1: p1, 2: p2}
         board = Board(board_size, board_size)
+        # Random opening plies, same reason as in arena_eval.play_match: without
+        # them two strong players replay nearly the same game every time and an
+        # N-game match is worth far less than N games.
+        for _ in range(getattr(cfg, "match_random_plies", 0)):
+            legal = board.possible_moves()
+            if not legal:
+                break
+            board.move(*legal[rng.integers(len(legal))])
         for _ in range(max_plies):
             if board.winning_player() or not board.possible_moves():
                 break
             mv = players[board.current_player].move(board, rng)
             if mv is None or tuple(mv) not in board.possible_moves():
-                break
+                # NEVER score an aborted game. This used to `break`, and
+                # game_winner() then scored the half-played board by box count --
+                # after the random opening plies player 1 leads 2 chips to 1, so a
+                # player that failed to move HANDED the point to its opponent.
+                # That is the entire "the net beats AlphaBeta 75%" result: six
+                # iterations whose 8-game match finished in 0.3s with exactly 4
+                # net wins, one per game where AlphaBeta moved first. An abort is
+                # a bug in a player, so it has to be loud.
+                from .mcts_az import terminal_value
+                raise RuntimeError(
+                    f"match aborted: player {board.current_player} returned "
+                    f"{mv!r} with {len(board.possible_moves())} legal moves "
+                    f"available; winning_player={board.winning_player()} "
+                    f"terminal_value={terminal_value(board)} "
+                    f"board={[list(r) for r in board.board]} "
+                    f"owner={[list(r) for r in board.player]}")
             board.move(*mv)
         w = game_winner(board)
         if w == 0:

@@ -183,7 +183,7 @@ class MCTS:
             v_mix = root.value
         return np.where(N > 0, q, v_mix)
 
-    def _sigma(self, root, q_comp):
+    def _sigma(self, root, q_comp, max_visits=None):
         """mctx's `qtransform_completed_by_mix_value`: rescale the completed Q to
         [0, 1] FIRST, then scale by (c_visit + max_N) * c_scale.
 
@@ -192,17 +192,26 @@ class MCTS:
         completed policy collapses to a near-one-hot pick driven by search noise
         (measured target entropy 0.005-0.76 out of 3.22 on 5x5) and Sequential
         Halving ignores its own Gumbel noise. mctx uses value_scale=0.1 on
-        rescaled Q; c_scale in config.py now matches."""
+        rescaled Q; c_scale in config.py now matches.
+
+        `max_visits` is the largest visit count THIS search produced. It must not
+        include visits carried over by tree reuse: mctx builds a fresh tree every
+        move, so its max_N is bounded by the sim budget. Counting inherited visits
+        inflates the multiplier — after a few reused plies max_N ran well past the
+        budget, so sigma grew and the training target came out sharper than the
+        algorithm intends. Verified against mctx `qtransforms.py`
+        (value_scale=0.1, maxvisit_init=50.0, rescale_values=True)."""
         lo, hi = q_comp.min(), q_comp.max()
         span = hi - lo
         q = (q_comp - lo) / span if span > 1e-8 else np.zeros_like(q_comp)
-        return (self.c_visit + root.child_N.max()) * self.c_scale * q
+        mv = root.child_N.max() if max_visits is None else max_visits
+        return (self.c_visit + mv) * self.c_scale * q
 
-    def _completed_policy(self, root, logits):
+    def _completed_policy(self, root, logits, max_visits=None):
         """Gumbel 'completed policy': softmax over legal of logits + sigma(q_comp),
         where visited actions use their search Q and unvisited use the mixed value
         v_mix. This is the improved-policy training target."""
-        z = logits + self._sigma(root, self._q_completed(root))
+        z = logits + self._sigma(root, self._q_completed(root), max_visits)
         z -= z.max()
         p = np.exp(z)
         p /= p.sum()
@@ -220,10 +229,13 @@ class MCTS:
         move is decided, so extra sims would only re-sample the same value."""
         k = len(root.legal)
         logits = np.log(np.clip(root.priors, 1e-9, None))
+        # visits already on the root when tree reuse handed it to us; sigma's
+        # max-visit term must count only the ones THIS search adds (see _sigma).
+        base_N = root.child_N.copy()
         if k == 1:
             self._simulate_from(root, 0)
             root.selected_action = int(root.legal[0])
-            return self._completed_policy(root, logits)
+            return self._completed_policy(root, logits, (root.child_N - base_N).max())
 
         r = rng if rng is not None else self._rng
         g = r.gumbel(size=k) if add_noise else np.zeros(k)
@@ -251,7 +263,8 @@ class MCTS:
                     break
             if n_cand <= 1:
                 break
-            scores = g + logits + self._sigma(root, self._q_completed(root))
+            scores = g + logits + self._sigma(root, self._q_completed(root),
+                                              (root.child_N - base_N).max())
             cand = sorted(cand, key=lambda a: scores[a], reverse=True)[:max(1, n_cand // 2)]
 
         while remaining > 0:                         # spend any rounding remainder on the leader
@@ -259,7 +272,7 @@ class MCTS:
             remaining -= 1
 
         root.selected_action = int(root.legal[cand[0]])
-        return self._completed_policy(root, logits)
+        return self._completed_policy(root, logits, (root.child_N - base_N).max())
 
     def _puct_search(self, root, n_sims, deadline, add_noise, rng=None):
         """Classic PUCT loop (wall-clock / time-budget path). Returns normalized

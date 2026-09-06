@@ -31,10 +31,19 @@
           <span class="choice-sub">Play against an engine and watch it think</span>
         </button>
         <button class="choice" data-mode="hvh" type="button">
-          <span class="choice-title">Two players</span>
-          <span class="choice-sub">Share one screen, take turns</span>
+          <span class="choice-title">One screen</span>
+          <span class="choice-sub">Two to five people, taking turns on this device</span>
+        </button>
+        <button class="choice" data-mode="online" type="button">
+          <span class="choice-title">Online with friends</span>
+          <span class="choice-sub">Get a code, send it round, everyone plays from their own browser</span>
         </button>
       </div>
+    </div>
+
+    <div class="field" id="name-field" hidden>
+      <label class="label" for="in-name">Your name</label>
+      <input class="name-input" id="in-name" type="text" maxlength="16" placeholder="Player 1">
     </div>
 
     <div class="field" id="opponent-field">
@@ -52,6 +61,16 @@
           <span class="swatch p2"></span><span class="choice-title">Computer</span>
         </button>
       </div>
+    </div>
+
+    <div class="field" id="players-field" hidden>
+      <label class="label" for="in-players">How many players?</label>
+      <div class="stepper">
+        <button class="step" data-step="-1" data-target="in-players" type="button">&minus;</button>
+        <input id="in-players" type="number" value="2" min="2" max="5" inputmode="numeric">
+        <button class="step" data-step="1" data-target="in-players" type="button">+</button>
+      </div>
+      <p class="hint" id="players-hint">Two to five. The computer players only know the two-player game.</p>
     </div>
 
     <div class="field-row">
@@ -78,31 +97,43 @@
     <p class="setup-error" id="setup-error"></p>
     <button class="btn primary big" id="btn-start" type="button">Start game</button>
   </div>
+
+  <div class="setup-card card" id="join-card">
+    <h2>Join a friend</h2>
+    <p class="hint">Type the four letters they sent you.</p>
+    <div class="join-row">
+      <input id="in-code" type="text" maxlength="4" autocomplete="off"
+             spellcheck="false" placeholder="CODE">
+      <button class="btn primary" id="btn-join" type="button">Join</button>
+    </div>
+    <input class="name-input" id="in-join-name" type="text" maxlength="16"
+           placeholder="Your name" style="margin-top:9px">
+    <p class="setup-error" id="join-error"></p>
+  </div>
+</div>
+
+<!-- ============================ LOBBY SCREEN =========================== -->
+<div class="setup-screen" id="lobby" hidden>
+  <div class="setup-card card lobby-card">
+    <h2>Waiting for players</h2>
+    <p class="lobby-hint">Send these letters to your friends. They type them into
+      &ldquo;Join a friend&rdquo; on the front page.</p>
+    <div class="lobby-code" id="lobby-code">&mdash;</div>
+    <button class="btn ghost small" id="btn-copy" type="button">Copy the link</button>
+    <div class="lobby-seats" id="lobby-seats"></div>
+    <p class="waiting" id="lobby-waiting"><span class="dots"><i></i><i></i><i></i></span></p>
+    <div class="lobby-actions">
+      <button class="btn primary" id="btn-start-now" type="button" hidden>Start with who is here</button>
+      <button class="btn ghost" id="btn-lobby-cancel" type="button">Cancel</button>
+    </div>
+  </div>
 </div>
 
 <!-- ============================= GAME SCREEN ============================ -->
 <main class="game-screen" id="game" hidden>
 
   <div class="board-column">
-    <div class="scoreboard">
-      <div class="pcard" id="pcard-1" data-p="1">
-        <span class="dot"></span>
-        <span class="meta">
-          <span class="name" id="name-1">Player 1</span>
-          <span class="sub" id="sub-1"></span>
-        </span>
-        <span class="thinking-badge">thinking<span class="dots"><i></i><i></i><i></i></span></span>
-      </div>
-      <div class="vs">vs</div>
-      <div class="pcard" id="pcard-2" data-p="2">
-        <span class="dot"></span>
-        <span class="meta">
-          <span class="name" id="name-2">Player 2</span>
-          <span class="sub" id="sub-2"></span>
-        </span>
-        <span class="thinking-badge">thinking<span class="dots"><i></i><i></i><i></i></span></span>
-      </div>
-    </div>
+    <div class="scoreboard" id="scoreboard"></div>
 
     <div class="board-stage card">
       <div id="board-grid"></div>
@@ -183,6 +214,8 @@
       <li>When a cell reaches <b>5</b> it topples: it loses 4 blocks and pushes one block into each neighbour.</li>
       <li>Every cell it topples into becomes <b>yours</b>. Toppling can set off a chain reaction.</li>
       <li>Own every cell on the board and you win.</li>
+      <li>With three or more players: once every cell belongs to somebody else,
+        you have nowhere left to play and you are out. Last one standing wins.</li>
     </ol>
     <button class="btn primary" id="btn-rules-close" type="button">Got it</button>
   </div>

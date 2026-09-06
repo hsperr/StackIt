@@ -15,6 +15,9 @@ def flip_move(p, x, y):
     return (p[0], y - 1 - p[1])
 
 
+QUIESCE_PLIES = 6          # max extra plies the quiescence search may extend
+
+
 class AlphaBeta:
     EXACT_MATCH = 1
     UPPERBOUND = 2
@@ -37,6 +40,9 @@ class AlphaBeta:
             entry = self.hashtable.get(board.zkey, None)
             if entry:
                 hash_depth, hash_move, hash_alpha, hash_beta, hash_type = entry
+                # A stand-pat quiescence node stores no move; the PV ends there.
+                if hash_move is None:
+                    break
                 pv.append(hash_move)
                 if not hash_move in board.possible_moves():
                     break
@@ -107,38 +113,6 @@ class AlphaBeta:
         return self.allowed_time and time.time()-self.start_time>self.allowed_time
 
 
-    def quiescense(self, board, depth):
-        poss_moves = board.possible_attack_moves()
-        # print(depth, poss_moves)
-        if not poss_moves or depth == 0:
-            score = board.boxes_for(board.current_player) - board.boxes_for(board.other_player)
-            return score
-        else:
-            max_score = -100000000
-
-            excludes = set()
-            for move in poss_moves:
-                if move in excludes:
-                    continue
-
-                self.stats['quiet_moves'] += 1
-
-                excludes.add((move[0]+1, move[1]))
-                excludes.add((move[0]-1, move[1]))
-                excludes.add((move[0], move[1]+1))
-                excludes.add((move[0], move[1]-1))
-
-                # print(depth, move)
-                # board.print()
-                # input()
-                board.move(*move)
-
-                score = self.quiescense(board, depth - 1)
-                board.undo()
-                # print(depth, move, score)
-                max_score = max(score, max_score)
-
-            return max_score
 
     def _maxmimize(self, board, alpha, beta, depth):
         if self.time_over():
@@ -152,7 +126,9 @@ class AlphaBeta:
         #     return None, score
 
         if board.winning_player():
-            return None, -1000000
+            # Ply-adjusted so a faster win outranks a slower one (and a slower
+            # loss outranks a faster one). Without this the engine dawdles.
+            return None, -1000000 + (self.root_depth - depth)
 
         best_score = -10000000
         best_move = None
@@ -181,10 +157,21 @@ class AlphaBeta:
                     self.stats['hash_cutoff'] += 1
                     return hash_move, hash_alpha
 
-        if depth <= -6:
+        if depth <= -QUIESCE_PLIES:
             score = board.boxes_for(board.current_player) - board.boxes_for(board.other_player)
             return None, score
         elif depth <= 0:
+            # Quiescence with a STAND-PAT bound. Without it the side to move is
+            # forced to keep exploding, so every quiet position is scored as if
+            # it had to play out a cascade it would never choose. Standing pat is
+            # a legal option, so its score is a lower bound on this node.
+            stand = board.boxes_for(board.current_player) - board.boxes_for(board.other_player)
+            if stand >= beta:
+                self.stats['qs_standpat_cutoff'] += 1
+                return None, stand
+            if stand > alpha:
+                alpha = stand
+            best_score = stand
             poss_moves = board.possible_attack_moves()
         else:
             poss_moves = board.possible_moves()

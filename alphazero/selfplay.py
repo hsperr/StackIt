@@ -15,8 +15,8 @@ Two efficiency devices from KataGo / Gumbel AlphaZero are used here:
 
 Each ply plays the Gumbel search's *selected action* (the Sequential-Halving
 survivor), while recording the completed policy as the training target. Root
-Gumbel noise is the exploration device: on for the first `temp_moves` plies (so
-the selected action varies), off afterwards (greedy).
+Gumbel noise is the exploration device and is on for EVERY ply, which is what
+mctx does during training (`gumbel_noise_plies = 0`).
 """
 from dataclasses import replace
 
@@ -47,6 +47,18 @@ def _ownership(final_board, mover, n):
             o = row[x]
             own[y * n + x] = 0 if o == 0 else (1 if o == mover else 2)
     return own
+
+
+def _search_value(root):
+    """The root's own verdict on this position, from the mover's perspective.
+
+    child_W accumulates `sign * leaf_value` with the sign flipped at every level,
+    so a root child's W is already in the ROOT MOVER's frame (higher = better for
+    the player to move) — the same frame as the game-result label z. Averaging W
+    over all root visits gives the search's value for the position.
+    """
+    n = root.child_N.sum() if root.child_N is not None else 0
+    return float(root.child_W.sum() / n) if n > 0 else float(root.value)
 
 
 def play_game(evaluator, cfg, rng, opponent_ev=None):
@@ -96,17 +108,26 @@ def play_game(evaluator, cfg, rng, opponent_ev=None):
         else:
             budget = cfg.num_simulations
         r = reuse if (pure_selfplay and cfg.tree_reuse) else None
-        # Gumbel noise IS the exploration device: on it for the first temp_moves
-        # plies (varied selected action), off after (greedy). It replaces the old
-        # tau=1 completed-policy sampling.
-        explore = ply < cfg.temp_moves
+        # Gumbel noise IS the exploration device. mctx keeps it on for every
+        # training move (gumbel_scale=1.0; only evaluation sets it to 0), so
+        # `gumbel_noise_plies = 0` means "every ply" and matches the reference.
+        # Capping it at temp_moves was ours, and it cost us: past ply 16 self-play
+        # was fully deterministic, so every recorded position came from the net's
+        # own greedy line and it never saw the moves it already dislikes — the
+        # narrow-policy trap feeding itself.
+        if getattr(cfg, "self_play_gumbel", True):
+            npl = getattr(cfg, "gumbel_noise_plies", 0)
+            explore = npl <= 0 or ply < npl
+        else:
+            explore = ply < cfg.temp_moves       # tau=1 ablation keeps the old rule
         pi, root = (mcts if is_main else mcts_opp).search(
             board, add_noise=explore, max_sims=budget, reuse_root=r)
         if pi.sum() == 0:
             break
 
         if record:                                    # record only full-search main moves
-            positions.append((encode(board), pi.astype(np.float32), mover))
+            positions.append((encode(board), pi.astype(np.float32), mover,
+                              _search_value(root)))
 
         # Play the Sequential-Halving survivor, NOT an argmax of the completed
         # policy — the latter can pick an action that Gumbel search eliminated.
@@ -133,10 +154,15 @@ def play_game(evaluator, cfg, rng, opponent_ev=None):
 
     winner = game_winner(board)
     examples = []
-    for planes, pi, player in positions:
+    qr = getattr(cfg, "value_q_ratio", 0.0)
+    for planes, pi, player, q in positions:
         z = 0.0 if winner == 0 else (1.0 if player == winner else -1.0)
+        # TRAIN on the blend; keep raw z as the 5th field so held-out value metrics
+        # always score against the real game result and stay comparable between
+        # runs with different q_ratio.
+        target = (1.0 - qr) * z + qr * q if qr else z
         own = _ownership(board, player, n)
-        examples.append((planes, pi, z, own))
+        examples.append((planes, pi, np.float32(target), own, np.float32(z)))
 
     record = {"moves": moves, "size": n, "winner": winner, "plies": len(moves)}
     return examples, record
@@ -148,7 +174,7 @@ def expand_symmetries(examples, cfg):
         return list(examples)
     out = []
     n = cfg.board_size
-    for planes, pi, z, own in examples:
+    for planes, pi, z, own, *rest in examples:
         for p2, pi2, own2 in augment(planes, pi, own, n, n):
-            out.append((p2, pi2.astype(np.float32), z, own2))
+            out.append((p2, pi2.astype(np.float32), z, own2, *rest))
     return out

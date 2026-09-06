@@ -17,33 +17,43 @@ class Board:
     # board to a string for its transposition-table key (that to_string() call
     # used to dominate search time). Tables are built once per board size and
     # shared across all boards of that size.
-    _ZOBRIST = {}          # (size_x, size_y) -> (piece_table, side_key)
+    _ZOBRIST = {}          # (size_x, size_y, num_players) -> (piece, side_keys)
     _ZVMAX = 16            # max cell value covered (stable 0-4, transient <=8)
 
     @classmethod
-    def _zobrist_tables(cls, size_x, size_y):
-        tables = cls._ZOBRIST.get((size_x, size_y))
+    def _zobrist_tables(cls, size_x, size_y, num_players=2):
+        tables = cls._ZOBRIST.get((size_x, size_y, num_players))
         if tables is None:
             # Fixed seed -> reproducible keys across runs/processes (matters for
             # the parallel self-play workers that share a TT-less protocol but
             # still benefit from deterministic behaviour in tests).
-            rng = random.Random(0x57ACC17 ^ (size_x << 8) ^ size_y)
+            # Two players keep the original seed, so a normal board hashes
+            # exactly as it did before more players were an option.
+            seed = 0x57ACC17 ^ (size_x << 8) ^ size_y
+            if num_players != 2:
+                seed ^= num_players << 24
+            rng = random.Random(seed)
             ncells = size_x * size_y
             # piece[pos][owner][value]. Empty cells (owner 0, value 0) are
             # forced to 0 so they contribute nothing to the key.
             piece = [[[rng.getrandbits(64) for _ in range(cls._ZVMAX + 1)]
-                      for _ in range(3)] for _ in range(ncells)]
+                      for _ in range(num_players + 1)] for _ in range(ncells)]
             for pos in range(ncells):
                 piece[pos][0][0] = 0
-            tables = (piece, rng.getrandbits(64))
-            cls._ZOBRIST[(size_x, size_y)] = tables
+            # One key per seat, XORed in for whoever is to move. Player 1's key
+            # is fixed at 0, so a two-player board draws the single key the
+            # earlier one-key version drew, in the same order.
+            sides = [0, 0] + [rng.getrandbits(64) for _ in range(num_players - 1)]
+            tables = (piece, sides)
+            cls._ZOBRIST[(size_x, size_y, num_players)] = tables
         return tables
 
     def _init_zobrist(self):
         """Bind this board to its size's Zobrist tables and compute the key
         from scratch. Call once, after board/player/current_player are final."""
         self._sx = len(self.board[0])
-        self._piece, self._side = Board._zobrist_tables(self._sx, len(self.board))
+        self._piece, self._sides = Board._zobrist_tables(
+            self._sx, len(self.board), self.num_players)
         self.zkey = self._compute_zkey()
 
     def _compute_zkey(self):
@@ -52,9 +62,7 @@ class Board:
             for v, p in zip(brow, prow):
                 z ^= piece[pos][p][v]
                 pos += 1
-        if self.current_player == 2:
-            z ^= self._side
-        return z
+        return z ^ self._sides[self.current_player]
 
     @classmethod
     def from_string(cls, board_string):
@@ -97,11 +105,12 @@ class Board:
         return self.zkey
 
     def copy(self):
-        return Board.from_custom_board(self.board, self.player, self.current_player)
+        return Board.from_custom_board(self.board, self.player, self.current_player,
+                                       self.num_players)
 
     @classmethod
-    def from_custom_board(cls, board, player, current_player=1):
-        instance = cls()
+    def from_custom_board(cls, board, player, current_player=1, num_players=2):
+        instance = cls(num_players=num_players)
         # Row-slice copy: fully independent (ints are immutable) and much
         # cheaper than deepcopy for this list-of-lists-of-ints shape.
         instance.board = [row[:] for row in board]
@@ -110,7 +119,11 @@ class Board:
         instance._init_zobrist()
         return instance
 
-    def __init__(self, size_x=5, size_y=5):
+    def __init__(self, size_x=5, size_y=5, num_players=2):
+        # Seats are numbered 1..num_players. Two is the classic game and the
+        # only shape the search engines understand; three to five is for
+        # humans playing each other.
+        self.num_players = max(2, int(num_players))
         self.board = [[0 for _ in range(size_x)] for _ in range(size_y)]
         self.player = [[0 for _ in range(size_x)] for _ in range(size_y)]
 
@@ -129,15 +142,42 @@ class Board:
 
     @property
     def other_player(self):
-        if self.current_player == 1:
-            return 2
-        else:
-            return 1
+        """The seat that moves after this one, ignoring knock-outs. With two
+        players that is simply the opponent, which is all the engines mean
+        by it."""
+        if self.num_players == 2:
+            return 2 if self.current_player == 1 else 1
+        return self.current_player % self.num_players + 1
+
+    def can_move(self, player):
+        """True while `player` still has somewhere to put a block: any empty
+        cell, or any cell of their own. Cells never empty out again, so once
+        this turns false it stays false and the player is out for good."""
+        for prow in self.player:
+            for p in prow:
+                if p == 0 or p == player:
+                    return True
+        return False
+
+    def alive_players(self):
+        return [p for p in range(1, self.num_players + 1) if self.can_move(p)]
+
+    def _advance_player(self):
+        """Hand the turn to the next seat that can still move."""
+        if self.num_players == 2:
+            self.current_player = 2 if self.current_player == 1 else 1
+            return
+        cur = self.current_player
+        nxt = cur % self.num_players + 1
+        while nxt != cur and not self.can_move(nxt):
+            nxt = nxt % self.num_players + 1
+        self.current_player = nxt
 
     def flip(self):
         # Bypass __init__ so we don't allocate two zero grids only to discard
         # them; these symmetry boards are used purely for hashing.
         b = Board.__new__(Board)
+        b.num_players = self.num_players
         b.current_player = self.current_player
         b.board = self.board[::-1]
         b.player = self.player[::-1]
@@ -147,6 +187,7 @@ class Board:
 
     def rotate(self):
         b = Board.__new__(Board)
+        b.num_players = self.num_players
         b.current_player = self.current_player
         b.board = [list(x) for x in zip(*self.board[::-1])]
         b.player = [list(x) for x in zip(*self.player[::-1])]
@@ -196,18 +237,19 @@ class Board:
         return 0 <= x < len(self.board[0]) and 0 <= y < len(self.board)
 
     def winning_player(self):
-        # Single pass instead of two full scans: track whether the grid is
-        # all-1s / all-2s and bail out as soon as neither is possible.
-        p1 = p2 = True
+        # A player wins by owning the whole grid. One pass: remember the first
+        # owner seen and bail out the moment a second one (or an empty cell)
+        # turns up.
+        owner = 0
         for row in self.player:
             for v in row:
-                if v != 1:
-                    p1 = False
-                if v != 2:
-                    p2 = False
-                if not p1 and not p2:
+                if v == 0:
                     return 0
-        return 1 if p1 else (2 if p2 else 0)
+                if owner == 0:
+                    owner = v
+                elif v != owner:
+                    return 0
+        return owner
 
     def _throw_over(self, x, y):
         # Every cell mutation here also folds the change into self.zkey (XOR out
@@ -317,12 +359,10 @@ class Board:
                     on_step(self)
                 fields = self._fields_to_throw()
 
-        # Flip side to move; toggling the side key XORs it in/out symmetrically.
-        self.zkey ^= self._side
-        if self.current_player == 1:
-            self.current_player = 2
-        else:
-            self.current_player = 1
+        # Hand over the turn, and swap the old seat's key for the new one's.
+        old = self.current_player
+        self._advance_player()
+        self.zkey ^= self._sides[old] ^ self._sides[self.current_player]
 
     def _player_color(self, player):
         if player == 1:

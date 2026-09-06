@@ -5,6 +5,10 @@ top-level arena.py, which exists to load *different* code versions at once).
 Players expose `move(board, rng) -> (x, y)`. Colors alternate across games so
 first-player advantage cancels out.
 """
+import json
+import os
+import subprocess
+
 import numpy as np
 
 from board import Board
@@ -38,9 +42,92 @@ class AZPlayer:
         else:
             counts, root = self.mcts.search(board, add_noise=explore, rng=rng)
         if counts.sum() == 0:
+            # A zero policy is only legitimate when the root is terminal. Anywhere
+            # else it means the search returned no visits, and returning None there
+            # used to abort the match and hand the point to the opponent by box
+            # count. Say what actually happened instead.
+            from .mcts_az import terminal_value
+            if terminal_value(board) is None:
+                raise RuntimeError(
+                    f"AZPlayer: search produced a zero policy on a non-terminal "
+                    f"board. sims={self.mcts.sims} time_budget={self.time_budget} "
+                    f"use_gumbel={self.mcts.use_gumbel} ply={self._ply} "
+                    f"root.is_terminal={root.is_terminal} "
+                    f"root.legal={None if root.legal is None else len(root.legal)} "
+                    f"child_N.sum={None if root.child_N is None else root.child_N.sum()} "
+                    f"selected_action={root.selected_action} "
+                    f"legal_moves={len(board.possible_moves())}")
             return None
         self._ply += 1
         return index_to_move(root.selected_action, board.size_x)
+
+
+class CAlphaBetaPlayer:
+    """AlphaBeta played by the C engine in `c_engine/` instead of `alphabeta.py`.
+
+    Same algorithm, ~50x the nodes/sec, so at equal wall-clock it searches about
+    4 ply deeper. The binary is spoken to over a line protocol on a long-lived
+    subprocess (one per worker process, reused across games) — spawning per move
+    would cost more than the search at small budgets.
+
+    Request : "<sx> <sy> <side> <secs> <max_depth> <v:o> <v:o> ..." (cells in
+              ascending index order, index = y*sx + x)
+    Response: one JSON line, {"move": [x, y] | null, ...}
+    """
+
+    _shared = {}          # binary path -> Popen, one per worker process
+
+    def __init__(self, budget=0.05, binary=None, max_depth=40):
+        self.budget = budget
+        self.max_depth = max_depth
+        self.binary = binary or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "c_engine", "stackit")
+
+    def reset(self):
+        pass
+
+    def _proc(self):
+        pr = CAlphaBetaPlayer._shared.get(self.binary)
+        if pr is None or pr.poll() is not None:
+            pr = subprocess.Popen([self.binary, "--serve"],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  text=True, bufsize=1)
+            CAlphaBetaPlayer._shared[self.binary] = pr
+        return pr
+
+    def move(self, board, rng):
+        sx, sy = board.size_x, board.size_y
+        cells = " ".join(f"{board.board[y][x]}:{board.player[y][x]}"
+                         for y in range(sy) for x in range(sx))
+        req = f"{sx} {sy} {board.current_player} {self.budget} {self.max_depth} {cells}\n"
+        pr = self._proc()
+        pr.stdin.write(req)
+        pr.stdin.flush()
+        line = pr.stdout.readline()
+        if not line:                                  # engine died — do not fail the match
+            raise RuntimeError(f"C AlphaBeta engine died ({self.binary})")
+        mv = json.loads(line).get("move")
+        return tuple(mv) if mv else None
+
+
+def make_alphabeta(cfg, budget):
+    """The AlphaBeta rating opponent, C or Python per `cfg.alphabeta_engine`.
+    Falls back to Python (loudly) if the C binary has not been built.
+
+    `cfg.alphabeta_depth` caps the search depth and `budget` is left effectively
+    infinite, so the wall clock never fires and iterative deepening always
+    completes that depth. This is what makes the bar reproducible: a wall-clock
+    budget makes the opponent's strength a function of machine load, which is why
+    the same seeded match used to score 38% / 25% / 0% on three consecutive runs.
+    """
+    depth = getattr(cfg, "alphabeta_depth", None)
+    if getattr(cfg, "alphabeta_engine", "python") == "c":
+        p = CAlphaBetaPlayer(budget, max_depth=depth or 40)
+        if os.path.exists(p.binary):
+            return p
+        print(f"[arena] C engine not built at {p.binary} — using the Python AlphaBeta")
+    return AlphaBetaPlayer(budget, max_depth=depth or 12)
 
 
 class RandomPlayer:
@@ -68,7 +155,8 @@ class AlphaBetaPlayer:
         return mv
 
 
-def play_match(player_a, player_b, n_games, board_size, max_plies, rng):
+def play_match(player_a, player_b, n_games, board_size, max_plies, rng,
+               opening_random_plies=0):
     """Return (wins_a, wins_b, draws). Colors swap every game."""
     wa = wb = draws = 0
     for g in range(n_games):
@@ -77,12 +165,25 @@ def play_match(player_a, player_b, n_games, board_size, max_plies, rng):
         player_a.reset(); player_b.reset()
         board = Board(board_size, board_size)
         players = {1: p1, 2: p2}
+        # Random opening plies: without them two strong nets replay nearly the
+        # same game every time, so an N-game match carries far less than N games
+        # of information. Self-play has always done this; the arena had not.
+        for _ in range(opening_random_plies):
+            legal = board.possible_moves()
+            if not legal:
+                break
+            board.move(*legal[rng.integers(len(legal))])
         for _ in range(max_plies):
             if board.winning_player() or not board.possible_moves():
                 break
             mv = players[board.current_player].move(board, rng)
             if mv is None or tuple(mv) not in board.possible_moves():
-                break
+                # See the same guard in parallel.py: scoring an aborted game by
+                # box count is what produced every inflated AlphaBeta winrate.
+                raise RuntimeError(
+                    f"match aborted: player {board.current_player} returned "
+                    f"{mv!r} with {len(board.possible_moves())} legal moves "
+                    f"available")
             board.move(*mv)
         w = game_winner(board)                # 0 / 1 / 2
         if w == 0:
